@@ -39,9 +39,17 @@ def get_storage_state_path() -> Path:
 
 
 def ensure_app_dirs() -> None:
-    """Ensure data and browser state directories exist with proper permissions."""
+    """Ensure data and browser state directories exist with restrictive permissions (0o700)."""
     data_dir = get_default_data_dir()
     browser_dir = get_browser_dir()
 
     data_dir.mkdir(parents=True, exist_ok=True)
     browser_dir.mkdir(parents=True, exist_ok=True)
+
+    # Restrict permissions to user-only (read/write/execute) on POSIX systems
+    if os.name == "posix":
+        try:
+            data_dir.chmod(0o700)
+            browser_dir.chmod(0o700)
+        except Exception:
+            pass

@@ -33,8 +33,9 @@ def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
     except ImportError:
         raise SubstackClientError("Playwright is not installed. Please run 'pip install playwright && playwright install'")
 
+    from substack_saved_mcp.config import ensure_app_dirs
+    ensure_app_dirs()
     target_dir = browser_dir or get_browser_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
     state_file = target_dir / "storage_state.json"
 
     print("Opening Substack sign-in window...")
@@ -59,6 +60,14 @@ def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
 
         context.storage_state(path=str(state_file))
         browser.close()
+
+    # Restrict permissions on session storage state file
+    import os
+    if os.name == "posix" and state_file.exists():
+        try:
+            state_file.chmod(0o600)
+        except Exception:
+            pass
 
     print(f"--> Authentication state saved successfully to {state_file}")
     return state_file

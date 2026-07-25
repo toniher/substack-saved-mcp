@@ -40,6 +40,8 @@ def get_db_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Conne
 
 def init_db(db_path: Optional[Path] = None) -> None:
     """Initialize SQLite database tables, indexes, FTS5 virtual table, and triggers."""
+    from substack_saved_mcp.config import ensure_app_dirs
+    ensure_app_dirs()
     with get_db_connection(db_path) as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS posts (
