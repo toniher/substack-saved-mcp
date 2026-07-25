@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "substack-saved-mcp"
+version = "0.1.0"
+description = "Local stdio-based MCP server and sync engine for Substack saved posts"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Developer" }
+]
+dependencies = [
+    "fastmcp>=0.1.0",
+    "playwright>=1.40.0",
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+substack-saved-mcp = "substack_saved_mcp.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/substack_saved_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,19 @@
+# Python & environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Application Data & Credentials (DO NOT COMMIT)
+data/
+browser_state/
+browser-state/
+storage_state.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env

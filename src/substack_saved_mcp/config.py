@@ -1,0 +1,47 @@
+"""Configuration settings and filesystem path management."""
+
+import os
+from pathlib import Path
+
+APP_NAME = "substack-saved-mcp"
+
+
+def get_default_data_dir() -> Path:
+    """Return OS-appropriate application data directory."""
+    if env_dir := os.getenv("SUBSTACK_SAVED_DATA_DIR"):
+        return Path(env_dir).expanduser().resolve()
+
+    xdg_data = os.getenv("XDG_DATA_HOME")
+    if xdg_data:
+        return (Path(xdg_data) / APP_NAME).resolve()
+
+    # Default to user home local share or fallback
+    return (Path.home() / ".local" / "share" / APP_NAME).resolve()
+
+
+def get_db_path() -> Path:
+    """Return path to SQLite database."""
+    if env_db := os.getenv("SUBSTACK_SAVED_DB_PATH"):
+        return Path(env_db).expanduser().resolve()
+    return get_default_data_dir() / "saved_posts.sqlite"
+
+
+def get_browser_dir() -> Path:
+    """Return path to Playwright browser context / storage state directory."""
+    if env_browser := os.getenv("SUBSTACK_SAVED_BROWSER_DIR"):
+        return Path(env_browser).expanduser().resolve()
+    return get_default_data_dir() / "browser_state"
+
+
+def get_storage_state_path() -> Path:
+    """Return path to storage_state.json."""
+    return get_browser_dir() / "storage_state.json"
+
+
+def ensure_app_dirs() -> None:
+    """Ensure data and browser state directories exist with proper permissions."""
+    data_dir = get_default_data_dir()
+    browser_dir = get_browser_dir()
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    browser_dir.mkdir(parents=True, exist_ok=True)
