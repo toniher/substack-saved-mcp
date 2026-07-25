@@ -10,28 +10,129 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 - **Privacy & Security**: Keeps session credentials local, redacting tokens from logs.
 - **FastMCP Protocol**: Stdio MCP interface with rich tool suite and resources.
 
+---
+
+## Installation with `uv`
+
+[`uv`](https://github.com/astral-sh/uv) is the recommended fast Python package manager for installing and running `substack-saved-mcp`.
+
+### Option A: Install System-wide as a Tool (`uv tool install`)
+
+Install directly from your local repository folder:
+
+```bash
+# Navigate to the repository
+cd /path/to/substack-saved-mcp
+
+# Install system-wide into an isolated uv environment
+uv tool install .
+
+# Or install directly from a remote Git repository:
+# uv tool install git+https://github.com/your-username/substack-saved-mcp.git
+```
+
+After installation, `substack-saved-mcp` is immediately available in your PATH:
+
+```bash
+# Verify installation
+substack-saved-mcp --help
+```
+
+To update or uninstall:
+```bash
+# Upgrade installed tool
+uv tool upgrade substack-saved-mcp
+
+# Uninstall tool
+uv tool uninstall substack-saved-mcp
+```
+
+---
+
+### Option B: Local Development / Development Environment (`uv sync`)
+
+If you are developing or modifying the codebase:
+
+```bash
+# Clone and enter directory
+cd substack-saved-mcp
+
+# Install dependencies and dev tools (pytest)
+uv sync --extra dev
+
+# Run CLI commands using uv run
+uv run substack-saved-mcp --help
+
+# Run tests
+uv run pytest
+```
+
+---
+
 ## Quick Start
 
 ```bash
-# Initialize local database
+# 1. Initialize local database
 substack-saved-mcp init
 
-# Authenticate with Substack (opens interactive browser window once)
+# 2. Authenticate with Substack (opens interactive browser window once)
 substack-saved-mcp login
 
-# Sync saved posts into local cache
+# 3. Sync saved posts into local cache
 substack-saved-mcp sync
 
-# Search saved posts via CLI
+# 4. Search saved posts via CLI
 substack-saved-mcp search "artificial intelligence"
 
-# Save or unsave a post
+# 5. Save or unsave a post
 substack-saved-mcp save "https://example.substack.com/p/post-slug"
 substack-saved-mcp unsave "https://example.substack.com/p/post-slug"
 
-# Launch stdio MCP server for Claude Desktop / Goose
+# 6. Launch stdio MCP server
 substack-saved-mcp serve
 ```
+
+---
+
+## Configuring MCP Clients (Claude Desktop, Goose, Cursor, etc.)
+
+Add `substack-saved-mcp` to your MCP client's configuration file (e.g. `claude_desktop_config.json`).
+
+### Using System-Wide Installed Tool (`uv tool` or global binary)
+
+```json
+{
+  "mcpServers": {
+    "substack-saved": {
+      "command": "substack-saved-mcp",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Using `uv` directly from the Repository Path
+
+If you prefer running directly from your repository path without installing system-wide:
+
+```json
+{
+  "mcpServers": {
+    "substack-saved": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/substack-saved-mcp",
+        "run",
+        "substack-saved-mcp",
+        "serve"
+      ]
+    }
+  }
+}
+```
+
+---
 
 ## Frequently Asked Questions (FAQ)
 
