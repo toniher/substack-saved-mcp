@@ -22,13 +22,16 @@ logger = logging.getLogger(__name__)
 
 def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
     """Parse raw Substack API JSON payload or DOM dict into a typed SavedPost object."""
-    # Check if raw_data is already a normalized dictionary from DOM extraction
-    if "canonical_url" in raw_data:
+    # Check if raw_data is a normalized dictionary from DOM extraction. Use an explicit
+    # marker: reader-API post objects also carry a "canonical_url" key and must instead
+    # go through the full API mapping below (canonicalization, post_date, id, etc.).
+    if raw_data.get("_dom"):
         return SavedPost(
             url=raw_data["canonical_url"],
             title=raw_data.get("title") or "Untitled Substack Post",
             publication_name=raw_data.get("publication_name") or "Substack",
             publication_url=raw_data.get("publication_url"),
+            author_name=raw_data.get("author_name"),
             excerpt=raw_data.get("excerpt"),
             published_at=raw_data.get("published_at"),
             saved_at=raw_data.get("saved_at"),
@@ -48,9 +51,9 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
     pub_url = pub_obj.get("custom_domain") or f"https://{pub_obj.get('subdomain')}.substack.com" if pub_obj.get("subdomain") else None
     author = post_obj.get("author") or post_obj.get("author_name") or (pub_obj.get("author_name") if pub_obj else None)
 
-    # Dates
+    # Dates. Leave saved_at unknown (None) rather than stamping the sync moment.
     published_at = post_obj.get("post_date") or post_obj.get("published_at")
-    saved_at = raw_data.get("created_at") or raw_data.get("saved_at") or datetime.now(timezone.utc).isoformat()
+    saved_at = raw_data.get("created_at") or raw_data.get("saved_at")
 
     excerpt = post_obj.get("description") or post_obj.get("subtitle") or post_obj.get("excerpt")
     content_text = post_obj.get("body_html") or post_obj.get("content_text")

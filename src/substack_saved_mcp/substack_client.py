@@ -115,10 +115,14 @@ class SubstackSavedPostsClient:
     def __init__(self, storage_state_path: Optional[Path] = None):
         self.state_path = storage_state_path or get_storage_state_path()
         self._dom_cache: Optional[List[Dict[str, Any]]] = None
+        self._api_cache: Optional[List[Dict[str, Any]]] = None
+        self._api_failed: bool = False
 
     def reset_cache(self) -> None:
-        """Reset cached DOM posts extraction."""
+        """Reset cached posts extraction (reader API and DOM fallback)."""
         self._dom_cache = None
+        self._api_cache = None
+        self._api_failed = False
 
     def _ensure_authenticated(self) -> None:
         """Check if storage state exists."""
@@ -141,46 +145,97 @@ class SubstackSavedPostsClient:
             raise SubstackClientError("Playwright is not installed.")
 
         with sync_playwright() as p:
-            api_context = p.request.new_context(storage_state=str(self.state_path))
+            # Prefer the reader inbox API: it returns the real bookmark timestamp
+            # (saved_at) and an ISO publication date (post_date) per post. The full
+            # saved list is fetched once via cursor pagination and cached, then sliced
+            # by offset so the caller keeps a simple offset/limit interface.
+            if self._api_cache is None and not self._api_failed:
+                api_context = p.request.new_context(storage_state=str(self.state_path))
+                self._api_cache = self._fetch_all_saved_via_reader_api(api_context)
+                if self._api_cache is None:
+                    self._api_failed = True
+                    logger.warning("Reader inbox API unavailable; falling back to DOM extraction.")
 
-            # Attempt fetching from Substack's saved posts / bookmarks API endpoints
-            endpoints = [
-                f"https://substack.com/api/v1/bookmarks?limit={limit}&offset={offset}",
-                f"https://substack.com/api/v1/reader/bookmarks?limit={limit}&offset={offset}",
-                f"https://substack.com/api/v1/saved?limit={limit}&offset={offset}",
-                f"https://substack.com/api/v1/saved_posts?limit={limit}&offset={offset}",
-            ]
+            if self._api_cache is not None:
+                return self._api_cache[offset : offset + limit]
 
-            response = None
-            for ep in endpoints:
-                res = api_context.get(ep)
-                if res.status in (401, 403) or "sign-in" in res.url:
-                    raise AuthRequiredError("Substack session has expired or is invalid. Please run 'substack-saved-mcp login'.")
-                if res.ok:
-                    response = res
-                    break
+            # Fallback: headless DOM extraction on https://substack.com/saved
+            return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
 
-            if not response or not response.ok:
-                # If API fails, fall back to headless DOM extraction on https://substack.com/saved
-                return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
+    def _fetch_all_saved_via_reader_api(
+        self, api_context: Any, page_size: int = 20, max_posts: int = 2000
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch the full saved list from the reader inbox API via cursor pagination.
+
+        Returns a list of enriched post dicts (each carrying its real ``saved_at``,
+        ISO ``post_date``, and an attached ``publication`` object), or ``None`` if the
+        endpoint is unavailable so the caller can fall back to DOM extraction. Raises
+        ``AuthRequiredError`` when the session is expired.
+        """
+        from urllib.parse import quote
+
+        all_posts: List[Dict[str, Any]] = []
+        seen_urls = set()
+        # "after=X" returns posts saved before X (newest first); a far-future sentinel
+        # yields the first (most recently saved) page. Substack always sends this param.
+        cursor: str = "2999-01-01T00:00:00.000Z"
+
+        while len(all_posts) < max_posts:
+            url = (
+                f"https://substack.com/api/v1/reader/posts?inboxType=saved"
+                f"&limit={page_size}&after={quote(cursor)}"
+            )
+
+            res = api_context.get(url)
+            if res.status in (401, 403) or "sign-in" in res.url:
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
+            if not res.ok:
+                # Unavailable on the first page → signal fallback; mid-stream → keep what we have.
+                return all_posts if all_posts else None
 
             try:
-                data = response.json()
-                if isinstance(data, list):
-                    return data
-                elif isinstance(data, dict):
-                    return (
-                        data.get("bookmarks")
-                        or data.get("posts")
-                        or data.get("items")
-                        or data.get("saved_posts")
-                        or data.get("savedPosts")
-                        or []
-                    )
-                return []
+                data = res.json()
             except Exception as e:
-                logger.warning(f"JSON parsing error from Substack response: {e}. Falling back to DOM extraction.")
-                return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
+                logger.warning(f"JSON parsing error from reader inbox API: {e}.")
+                return all_posts if all_posts else None
+
+            posts = data.get("posts") or []
+            if not posts:
+                break
+
+            pubs_by_id = {pub.get("id"): pub for pub in (data.get("publications") or [])}
+            before_len = len(all_posts)
+            page_min_saved: Optional[str] = None
+
+            for post in posts:
+                saved_at = post.get("saved_at")
+                if saved_at and (page_min_saved is None or saved_at < page_min_saved):
+                    page_min_saved = saved_at
+
+                # Attach publication object and author so parse_remote_post can read them.
+                pub = pubs_by_id.get(post.get("publication_id"))
+                if pub:
+                    post["publication"] = pub
+                bylines = post.get("publishedBylines") or []
+                if bylines and isinstance(bylines[0], dict) and bylines[0].get("name"):
+                    post.setdefault("author_name", bylines[0]["name"])
+
+                clean = canonicalize_url(post.get("canonical_url") or "")
+                if clean and clean not in seen_urls:
+                    seen_urls.add(clean)
+                    all_posts.append(post)
+
+            # Stop when the server says there is no more, we made no progress, or the
+            # cursor did not advance (guards against an inclusive-boundary infinite loop).
+            if not data.get("more") or not page_min_saved or len(all_posts) == before_len:
+                break
+            if page_min_saved == cursor:
+                break
+            cursor = page_min_saved
+
+        return all_posts
 
     def _fetch_via_dom(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
         """Fallback method: Render https://substack.com/saved in headless browser and extract post cards."""
@@ -216,29 +271,55 @@ class SubstackSavedPostsClient:
 
             while len(results) < target_count and stale_scrolls < max_stale_scrolls:
                 prev_count = len(results)
-                cards = page.locator("a[href*='/p/']").all()
+                cards = page.locator("div.reader2-post-container").all()
 
                 for card in cards:
                     try:
-                        href = card.get_attribute("href")
-                        title = card.inner_text().strip()
-                        if href and title and "/p/" in href:
-                            clean = canonicalize_url(href)
-                            if clean not in seen_urls:
-                                seen_urls.add(clean)
-                                # Extract publication name from hostname
-                                parsed = urlparse(clean)
-                                pub_name = parsed.netloc.split(".")[0].capitalize()
+                        link = card.locator("a[href*='/p/']").first
+                        if link.count() == 0:
+                            continue
+                        href = link.get_attribute("href")
+                        if not href or "/p/" not in href:
+                            continue
 
-                                results.append({
-                                    "canonical_url": clean,
-                                    "title": title.split("\n")[0],
-                                    "publication_name": pub_name,
-                                    "publication_url": f"{parsed.scheme}://{parsed.netloc}",
-                                    "excerpt": title,
-                                    "saved_at": None,
-                                    "published_at": None,
-                                })
+                        clean = canonicalize_url(href)
+                        if clean in seen_urls:
+                            continue
+                        seen_urls.add(clean)
+
+                        parsed = urlparse(clean)
+
+                        def _card_text(selector: str) -> Optional[str]:
+                            loc = card.locator(selector).first
+                            if loc.count() > 0:
+                                text = loc.inner_text().strip()
+                                return text or None
+                            return None
+
+                        title = _card_text(".reader2-post-title")
+                        pub_name = _card_text(".pub-name")
+                        excerpt = _card_text(".reader2-paragraph")
+                        # Localized relative display string (e.g. "1 de jul.", "3h");
+                        # Substack does not expose a machine-readable ISO date here.
+                        published_display = _card_text(".inbox-item-timestamp")
+
+                        # ".reader2-item-meta" reads like "Author∙8 min read"; take the author part.
+                        meta_text = _card_text(".reader2-item-meta")
+                        author = meta_text.split("∙")[0].strip() if meta_text else None
+
+                        fallback_pub = parsed.netloc.split(".")[0].capitalize()
+
+                        results.append({
+                            "_dom": True,
+                            "canonical_url": clean,
+                            "title": title or pub_name or fallback_pub,
+                            "publication_name": pub_name or fallback_pub,
+                            "publication_url": f"{parsed.scheme}://{parsed.netloc}",
+                            "author_name": author,
+                            "excerpt": excerpt,
+                            "saved_at": None,
+                            "published_at": published_display,
+                        })
                     except Exception:
                         continue
 

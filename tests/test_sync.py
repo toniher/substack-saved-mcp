@@ -116,16 +116,65 @@ def test_dom_scrolling_mock(tmp_path: Path):
     state_file.write_text('{"cookies": [], "origins": []}')
     client = SubstackSavedPostsClient(storage_state_path=state_file)
 
-    class MockCard:
-        def __init__(self, href, text):
-            self.href = href
-            self.text = text
+    class MockElement:
+        def __init__(self, present=True, href=None, text=None):
+            self._present = present
+            self._href = href
+            self._text = text
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1 if self._present else 0
 
         def get_attribute(self, attr):
-            return self.href
+            return self._href
 
         def inner_text(self):
-            return self.text
+            return self._text or ""
+
+        def is_visible(self):
+            return False
+
+        def click(self, **kwargs):
+            pass
+
+    class MockCard:
+        """Simulates a div.reader2-post-container with child selectors."""
+
+        def __init__(self, i):
+            self.i = i
+
+        def locator(self, sel):
+            if "a[href" in sel:
+                return MockElement(href=f"https://pub.substack.com/p/post-{self.i}")
+            if "reader2-post-title" in sel:
+                return MockElement(text=f"Title Post {self.i}")
+            if "pub-name" in sel:
+                return MockElement(text="Pub Name")
+            if "reader2-paragraph" in sel:
+                return MockElement(text="An excerpt.")
+            if "inbox-item-timestamp" in sel:
+                return MockElement(text="1 de jul.")
+            if "reader2-item-meta" in sel:
+                return MockElement(text="Author Name∙8 min read")
+            return MockElement(present=False)
+
+    class MockLoc:
+        def __init__(self, cards=None):
+            self._cards = cards or []
+
+        def count(self):
+            return 0
+
+        def all(self):
+            return self._cards
+
+        @property
+        def first(self):
+            return MockElement(present=False)
 
     class MockPage:
         url = "https://substack.com/saved"
@@ -138,17 +187,10 @@ def test_dom_scrolling_mock(tmp_path: Path):
             pass
 
         def locator(self, sel):
-            # Simulate 12 cards on initial load, then +12 per scroll
-            available = min(12 + self.scroll_count * 12, self.total_cards)
-            cards = [
-                MockCard(f"https://pub.substack.com/p/post-{i}", f"Title Post {i}")
-                for i in range(available)
-            ]
-            class MockLoc:
-                def count(self):
-                    return 0
-                def all(self_loc):
-                    return cards
+            if "reader2-post-container" in sel:
+                # Simulate 12 cards on initial load, then +12 per scroll
+                available = min(12 + self.scroll_count * 12, self.total_cards)
+                return MockLoc(cards=[MockCard(i) for i in range(available)])
             return MockLoc()
 
         def evaluate(self, script):
@@ -178,4 +220,72 @@ def test_dom_scrolling_mock(tmp_path: Path):
     assert len(results) == 30
     assert results[0]["canonical_url"] == "https://pub.substack.com/p/post-0"
     assert results[29]["canonical_url"] == "https://pub.substack.com/p/post-29"
+    # Publication date and title must be extracted from the card, not left None.
+    assert results[0]["title"] == "Title Post 0"
+    assert results[0]["published_at"] == "1 de jul."
+    assert results[0]["publication_name"] == "Pub Name"
+    assert results[0]["author_name"] == "Author Name"
+
+
+def test_reader_api_cursor_pagination(tmp_path: Path):
+    state_file = tmp_path / "storage_state.json"
+    state_file.write_text('{"cookies": [], "origins": []}')
+    client = SubstackSavedPostsClient(storage_state_path=state_file)
+
+    # Two pages of 2 posts each, ordered newest-saved first; the second page is
+    # requested with after=<oldest saved_at of page 1>.
+    pages = {
+        "2999-01-01T00:00:00.000Z": {
+            "posts": [
+                {"id": 1, "publication_id": 10, "title": "P1",
+                 "canonical_url": "https://a.substack.com/p/one",
+                 "post_date": "2026-06-10T00:00:00Z", "saved_at": "2026-06-20T00:00:00Z",
+                 "publishedBylines": [{"name": "Alice"}]},
+                {"id": 2, "publication_id": 11, "title": "P2",
+                 "canonical_url": "https://b.substack.com/p/two",
+                 "post_date": "2026-06-09T00:00:00Z", "saved_at": "2026-06-18T00:00:00Z",
+                 "publishedBylines": [{"name": "Bob"}]},
+            ],
+            "publications": [{"id": 10, "name": "Pub A"}, {"id": 11, "name": "Pub B"}],
+            "more": True,
+        },
+        "2026-06-18T00:00:00Z": {
+            "posts": [
+                {"id": 3, "publication_id": 12, "title": "P3",
+                 "canonical_url": "https://c.substack.com/p/three",
+                 "post_date": "2026-06-08T00:00:00Z", "saved_at": "2026-06-15T00:00:00Z",
+                 "publishedBylines": [{"name": "Carol"}]},
+            ],
+            "publications": [{"id": 12, "name": "Pub C"}],
+            "more": False,
+        },
+    }
+
+    class MockResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status = 200
+            self.ok = True
+            self.url = "https://substack.com/api/v1/reader/posts"
+
+        def json(self):
+            return self._payload
+
+    class MockApiContext:
+        def get(self, url):
+            after = None
+            if "after=" in url:
+                from urllib.parse import unquote
+                after = unquote(url.split("after=")[1].split("&")[0])
+            return MockResponse(pages[after])
+
+    posts = client._fetch_all_saved_via_reader_api(MockApiContext(), page_size=2)
+
+    assert [p["id"] for p in posts] == [1, 2, 3]
+    # Real inline bookmark timestamps are preserved.
+    assert posts[0]["saved_at"] == "2026-06-20T00:00:00Z"
+    assert posts[2]["saved_at"] == "2026-06-15T00:00:00Z"
+    # Client enriches each post with its publication object and author.
+    assert posts[0]["publication"]["name"] == "Pub A"
+    assert posts[0]["author_name"] == "Alice"
 

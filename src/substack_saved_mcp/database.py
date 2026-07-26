@@ -132,7 +132,10 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
             existing = cursor.fetchone()
 
         created_at = existing["created_at"] if existing else now_iso
-        saved_at = post.saved_at or (existing["saved_at"] if existing else now_iso)
+        # Preserve a known save time; never fabricate one from the DB-insert moment.
+        # When the source does not expose the original Substack bookmark time, leave
+        # saved_at NULL rather than stamping now().
+        saved_at = post.saved_at or (existing["saved_at"] if existing else None)
 
         cursor.execute("""
             INSERT INTO posts (
