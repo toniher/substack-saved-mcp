@@ -62,7 +62,10 @@ def sync(force: bool) -> None:
     result = run_sync(force=force)
 
     if result.status == "success":
-        click.secho(f"Sync complete! Fetched {result.fetched_count} posts, upserted {result.upserted_count} posts.", fg="green")
+        msg = f"Sync complete! Fetched {result.fetched_count} posts, upserted {result.upserted_count} posts."
+        if result.reconciled_count:
+            msg += f" Unsaved {result.reconciled_count} post(s) no longer on Substack's saved list."
+        click.secho(msg, fg="green")
     elif result.status == "auth_required":
         click.secho(f"Authentication required: {result.error_message}", fg="yellow")
     else:

@@ -10,6 +10,7 @@ from substack_saved_mcp.database import (
     finish_sync_run,
     get_post,
     init_db,
+    reconcile_unsaved_posts,
     start_sync_run,
     upsert_post,
 )
@@ -93,6 +94,10 @@ def sync_saved_posts(
     total_upserted = 0
     consecutive_matches = 0
     MAX_CONSECUTIVE_MATCHES = 3
+    # Only populated meaningfully for a force/full sync, which enumerates every
+    # currently-saved remote post; an incremental sync may stop early and its
+    # partial list must never be used to infer removals.
+    remote_urls: List[str] = []
 
     page_size = 50
     offset = 0
@@ -109,6 +114,7 @@ def sync_saved_posts(
                 parsed_post = parse_remote_post(item)
                 if not parsed_post.url:
                     continue
+                remote_urls.append(parsed_post.url)
 
                 # Incremental sync check
                 if not force:
@@ -132,11 +138,21 @@ def sync_saved_posts(
 
             offset += page_size
 
+        reconciled_count = 0
+        if force:
+            reconciled_count = reconcile_unsaved_posts(remote_urls, db_path=db_path)
+            if reconciled_count:
+                logger.info(
+                    f"Reconciliation: soft-deleted {reconciled_count} post(s) no longer "
+                    "in the remote saved list."
+                )
+
         finish_sync_run(
             sync_id=sync_id,
             status="success",
             fetched_count=total_fetched,
             upserted_count=total_upserted,
+            reconciled_count=reconciled_count,
             db_path=db_path,
         )
         return SyncRun(
@@ -147,6 +163,7 @@ def sync_saved_posts(
             sync_mode=sync_mode,
             fetched_count=total_fetched,
             upserted_count=total_upserted,
+            reconciled_count=reconciled_count,
         )
 
     except AuthRequiredError as e:

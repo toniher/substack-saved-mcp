@@ -81,6 +81,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 sync_mode TEXT NOT NULL DEFAULT 'incremental',
                 fetched_count INTEGER DEFAULT 0,
                 upserted_count INTEGER DEFAULT 0,
+                reconciled_count INTEGER DEFAULT 0,
                 error_message TEXT
             );
 
@@ -113,6 +114,11 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 VALUES (new.id, new.title, new.publication_name, new.author_name, new.excerpt, new.content_text);
             END;
         """)
+        # Additive migration for databases created before reconciliation tracking existed.
+        try:
+            conn.execute("ALTER TABLE sync_runs ADD COLUMN reconciled_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already present
 
 
 def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
@@ -214,6 +220,33 @@ def soft_delete_post(url_or_id: Union[str, int], db_path: Optional[Path] = None)
 
         cursor.execute("SELECT * FROM posts WHERE id = ?", (row["id"],))
         return SavedPost(**dict(cursor.fetchone()))
+
+
+def reconcile_unsaved_posts(remote_urls: List[str], db_path: Optional[Path] = None) -> int:
+    """Soft-delete locally-active posts absent from a complete remote saved-URL set.
+
+    Intended for use only after a full sync has enumerated every currently-saved
+    post on Substack (an incremental sync may stop early and would wrongly treat
+    un-refetched posts as removed). Skips entirely when remote_urls is empty, since
+    that's more likely a fetch problem than genuine mass-unsaving.
+    """
+    if not remote_urls:
+        return 0
+    clean_urls = {canonicalize_url(u) for u in remote_urls if u}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, url FROM posts WHERE is_saved = 1")
+        stale_ids = [row["id"] for row in cursor.fetchall() if row["url"] not in clean_urls]
+        if not stale_ids:
+            return 0
+
+        cursor.executemany(
+            "UPDATE posts SET is_saved = 0, unsaved_at = ?, updated_at = ? WHERE id = ?",
+            [(now_iso, now_iso, post_id) for post_id in stale_ids],
+        )
+        return len(stale_ids)
 
 
 def get_post(url_or_id: Union[str, int], db_path: Optional[Path] = None) -> Optional[SavedPost]:
@@ -399,6 +432,7 @@ def finish_sync_run(
     status: str,
     fetched_count: int,
     upserted_count: int,
+    reconciled_count: int = 0,
     error_message: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> None:
@@ -408,6 +442,7 @@ def finish_sync_run(
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE sync_runs
-            SET completed_at = ?, status = ?, fetched_count = ?, upserted_count = ?, error_message = ?
+            SET completed_at = ?, status = ?, fetched_count = ?, upserted_count = ?,
+                reconciled_count = ?, error_message = ?
             WHERE id = ?
-        """, (now_iso, status, fetched_count, upserted_count, error_message, sync_id))
+        """, (now_iso, status, fetched_count, upserted_count, reconciled_count, error_message, sync_id))

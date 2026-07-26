@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pytest
 
-from substack_saved_mcp.database import get_status, init_db, list_posts
+from substack_saved_mcp.database import get_post, get_status, init_db, list_posts, upsert_post
 from substack_saved_mcp.models import SavedPost
 from substack_saved_mcp.substack_client import AuthRequiredError, SubstackSavedPostsClient
 from substack_saved_mcp.sync import sync_saved_posts
@@ -109,6 +109,84 @@ def test_sync_saved_posts_multipage(tmp_path: Path):
 
     st = get_status(db_path)
     assert st.total_saved_posts == 65
+
+
+def test_force_sync_reconciles_removed_posts(tmp_path: Path):
+    """A post no longer present in the complete remote saved list must be
+    soft-deleted by a force/full sync, not left dangling as is_saved=1."""
+    db_path = tmp_path / "reconcile_test.sqlite"
+    init_db(db_path)
+
+    stale_post = SavedPost(
+        url="https://pub1.substack.com/p/removed-post",
+        title="Removed Post",
+        publication_name="Pub 1",
+        is_saved=1,
+    )
+    upsert_post(stale_post, db_path=db_path)
+
+    mock_payloads = [[
+        {
+            "created_at": "2026-06-01T10:00:00Z",
+            "post": {
+                "id": 101,
+                "title": "Post 1",
+                "canonical_url": "https://pub1.substack.com/p/post-1",
+                "publication": {"name": "Pub 1"},
+            },
+        },
+    ]]
+    client = MockSubstackClient(pages=mock_payloads)
+    run = sync_saved_posts(force=True, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    assert run.reconciled_count == 1
+
+    stale = get_post("https://pub1.substack.com/p/removed-post", db_path=db_path)
+    assert stale.is_saved == 0
+    assert stale.unsaved_at is not None
+
+    remaining = get_post("https://pub1.substack.com/p/post-1", db_path=db_path)
+    assert remaining.is_saved == 1
+
+    posts = list_posts(db_path=db_path)
+    assert len(posts) == 1
+    assert posts[0].url == "https://pub1.substack.com/p/post-1"
+
+
+def test_incremental_sync_does_not_reconcile(tmp_path: Path):
+    """An incremental sync may only see a partial remote list, so it must never
+    soft-delete posts missing from that partial fetch."""
+    db_path = tmp_path / "no_reconcile_test.sqlite"
+    init_db(db_path)
+
+    other_post = SavedPost(
+        url="https://pub1.substack.com/p/still-saved-elsewhere",
+        title="Still Saved",
+        publication_name="Pub 1",
+        is_saved=1,
+    )
+    upsert_post(other_post, db_path=db_path)
+
+    mock_payloads = [[
+        {
+            "created_at": "2026-06-01T10:00:00Z",
+            "post": {
+                "id": 101,
+                "title": "Post 1",
+                "canonical_url": "https://pub1.substack.com/p/post-1",
+                "publication": {"name": "Pub 1"},
+            },
+        },
+    ]]
+    client = MockSubstackClient(pages=mock_payloads)
+    run = sync_saved_posts(force=False, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    assert run.reconciled_count == 0
+
+    other = get_post("https://pub1.substack.com/p/still-saved-elsewhere", db_path=db_path)
+    assert other.is_saved == 1
 
 
 def test_dom_scrolling_mock(tmp_path: Path):

@@ -9,6 +9,7 @@ from substack_saved_mcp.database import (
     init_db,
     list_posts,
     list_publications,
+    reconcile_unsaved_posts,
     search_posts,
     soft_delete_post,
     upsert_post,
@@ -115,6 +116,33 @@ def test_soft_delete_post(temp_db: Path):
     status = get_status(temp_db)
     assert status.total_saved_posts == 0
     assert status.total_unsaved_posts == 1
+
+
+def test_reconcile_unsaved_posts(temp_db: Path):
+    kept = upsert_post(SavedPost(url="https://pub1.com/p/kept", title="Kept", publication_name="Pub One"), temp_db)
+    removed = upsert_post(SavedPost(url="https://pub1.com/p/removed", title="Removed", publication_name="Pub One"), temp_db)
+
+    count = reconcile_unsaved_posts(["https://pub1.com/p/kept"], db_path=temp_db)
+    assert count == 1
+
+    still_saved = get_post(kept.id, temp_db)
+    assert still_saved.is_saved == 1
+
+    unsaved = get_post(removed.id, temp_db)
+    assert unsaved.is_saved == 0
+    assert unsaved.unsaved_at is not None
+
+
+def test_reconcile_unsaved_posts_skips_empty_remote_list(temp_db: Path):
+    """An empty remote list is more likely a fetch glitch than mass-unsaving,
+    so reconciliation must be a no-op rather than wiping every saved post."""
+    post = upsert_post(SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One"), temp_db)
+
+    count = reconcile_unsaved_posts([], db_path=temp_db)
+    assert count == 0
+
+    unchanged = get_post(post.id, temp_db)
+    assert unchanged.is_saved == 1
 
 
 def test_list_publications(temp_db: Path):

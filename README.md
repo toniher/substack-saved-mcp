@@ -176,3 +176,16 @@ If you are using a local development environment (via `uv sync`), run:
 ```bash
 uv run playwright install
 ```
+
+### I edited the source code, but the installed `substack-saved-mcp` command still behaves like the old version. Why?
+
+`uv tool install` copies the package into its own isolated environment at install time — it does **not** track your working tree. If you edited files under `src/` (or pulled new commits) after installing the tool system-wide, the globally installed copy is stale and keeps running the old code, even though `uv run substack-saved-mcp ...` from the repo would use the latest source.
+
+Reinstall from your current working tree to pick up the changes:
+```bash
+uv tool install . --no-cache --force
+```
+- `--force` replaces the existing installed version instead of skipping the install because a version is already present.
+- `--no-cache` ensures a fresh build rather than reusing a cached wheel/build artifact from before your edits.
+
+Do this any time after modifying the codebase and before relying on the globally installed `substack-saved-mcp` binary (as opposed to `uv run substack-saved-mcp`, which always reflects the working tree).

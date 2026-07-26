@@ -64,6 +64,7 @@ class SyncRun(BaseModel):
     sync_mode: str = "incremental"  # 'incremental' or 'full'
     fetched_count: int = 0
     upserted_count: int = 0
+    reconciled_count: int = 0  # posts soft-deleted because they left the remote saved list
     error_message: Optional[str] = None
 
 
