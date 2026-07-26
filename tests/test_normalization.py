@@ -29,6 +29,7 @@ def test_parse_remote_post_json_payload():
     assert post.author_name == "Dr. AI"
     assert post.published_at == "2026-05-01T08:00:00.000Z"
     assert post.saved_at == "2026-05-10T14:30:00.000Z"
+    assert post.audience == "only_paid"
     assert post.is_paywalled == 1
 
 
@@ -59,4 +60,5 @@ def test_parse_remote_post_reader_api_shape():
     assert post.published_at == "2026-06-10T12:01:41.003Z"
     # The real Substack bookmark time, not the sync moment.
     assert post.saved_at == "2026-06-10T13:46:19.832Z"
+    assert post.audience == "everyone"
     assert post.is_paywalled == 0

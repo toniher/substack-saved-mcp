@@ -36,6 +36,7 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
             excerpt=raw_data.get("excerpt"),
             published_at=raw_data.get("published_at"),
             saved_at=raw_data.get("saved_at"),
+            audience=raw_data.get("audience"),
             is_saved=1,
         )
 
@@ -59,7 +60,8 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
     excerpt = post_obj.get("description") or post_obj.get("subtitle") or post_obj.get("excerpt")
     content_text = post_obj.get("body_html") or post_obj.get("content_text")
     image_url = post_obj.get("cover_image") or post_obj.get("image_url")
-    is_paywalled = 1 if post_obj.get("audience") == "only_paid" or post_obj.get("is_paywalled") else 0
+    audience = post_obj.get("audience")
+    is_paywalled = 1 if audience == "only_paid" or post_obj.get("is_paywalled") else 0
 
     return SavedPost(
         substack_post_id=substack_id,
@@ -74,6 +76,7 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
         excerpt=excerpt,
         content_text=content_text,
         image_url=image_url,
+        audience=audience,
         is_paywalled=is_paywalled,
     )
 

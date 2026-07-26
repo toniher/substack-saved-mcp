@@ -7,6 +7,7 @@ from substack_saved_mcp.database import (
     get_post,
     get_status,
     init_db,
+    list_audiences,
     list_posts,
     list_publications,
     reconcile_unsaved_posts,
@@ -143,6 +144,84 @@ def test_reconcile_unsaved_posts_skips_empty_remote_list(temp_db: Path):
 
     unchanged = get_post(post.id, temp_db)
     assert unchanged.is_saved == 1
+
+
+def test_audience_stored_and_filterable(temp_db: Path):
+    upsert_post(SavedPost(
+        url="https://pub1.com/p/free", title="Free Post", publication_name="Pub One",
+        excerpt="content", audience="everyone", is_saved=1,
+    ), temp_db)
+    upsert_post(SavedPost(
+        url="https://pub1.com/p/paid", title="Paid Post", publication_name="Pub One",
+        excerpt="content", audience="only_paid", is_saved=1,
+    ), temp_db)
+
+    fetched = get_post("https://pub1.com/p/paid", temp_db)
+    assert fetched.audience == "only_paid"
+
+    only_paid = list_posts(audience="only_paid", db_path=temp_db)
+    assert len(only_paid) == 1
+    assert only_paid[0].title == "Paid Post"
+    assert only_paid[0].audience == "only_paid"
+
+    search_results = search_posts("content", audience="everyone", db_path=temp_db)
+    assert len(search_results) == 1
+    assert search_results[0].title == "Free Post"
+
+
+def test_list_audiences(temp_db: Path):
+    upsert_post(SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One", audience="everyone"), temp_db)
+    upsert_post(SavedPost(url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One", audience="everyone"), temp_db)
+    upsert_post(SavedPost(url="https://pub1.com/p/3", title="Post 3", publication_name="Pub One", audience="only_paid"), temp_db)
+
+    tiers = list_audiences(temp_db)
+    assert len(tiers) == 2
+    by_tier = {t.audience: t.post_count for t in tiers}
+    assert by_tier["everyone"] == 2
+    assert by_tier["only_paid"] == 1
+
+
+def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
+    """A DB created before the audience column existed must not break init_db,
+    since CREATE INDEX IF NOT EXISTS on a missing column raises OperationalError."""
+    import sqlite3
+
+    old_db_path = tmp_path / "old_schema.sqlite"
+    conn = sqlite3.connect(str(old_db_path))
+    conn.execute("""
+        CREATE TABLE posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            substack_post_id TEXT UNIQUE,
+            url TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            publication_name TEXT NOT NULL,
+            publication_url TEXT,
+            author_name TEXT,
+            published_at TEXT,
+            saved_at TEXT,
+            unsaved_at TEXT,
+            is_saved INTEGER NOT NULL DEFAULT 1,
+            excerpt TEXT,
+            content_text TEXT,
+            image_url TEXT,
+            is_paywalled INTEGER DEFAULT 0,
+            reading_time_minutes INTEGER,
+            word_count INTEGER,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("INSERT INTO posts (url, title, publication_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                 ("https://old.substack.com/p/pre-existing", "Pre-existing Post", "Old Pub", "2026-01-01", "2026-01-01"))
+    conn.commit()
+    conn.close()
+
+    init_db(old_db_path)  # must not raise
+
+    post = get_post("https://old.substack.com/p/pre-existing", old_db_path)
+    assert post is not None
+    assert post.audience is None
 
 
 def test_list_publications(temp_db: Path):

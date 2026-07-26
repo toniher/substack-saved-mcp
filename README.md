@@ -4,7 +4,7 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 
 ## Features
 
-- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, publications, and content. Filter by publication and date ranges (`published_at` vs `saved_at`).
+- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, publications, and content. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`).
 - **Save & Unsave**: Bookmark new Substack posts or unbookmark existing ones via authenticated browser sessions.
 - **Offline First**: Fast, offline queries directly from local SQLite cache.
 - **Privacy & Security**: Keeps session credentials local, redacting tokens from logs.
@@ -83,6 +83,11 @@ substack-saved-mcp sync
 
 # 4. Search saved posts via CLI
 substack-saved-mcp search "artificial intelligence"
+
+# 4b. Filter by publication or audience tier (see which tiers are cached with `audiences`)
+substack-saved-mcp audiences
+substack-saved-mcp list --audience only_paid
+substack-saved-mcp search "artificial intelligence" --audience everyone
 
 # 5. Save or unsave a post
 substack-saved-mcp save "https://example.substack.com/p/post-slug"

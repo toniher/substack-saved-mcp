@@ -22,6 +22,7 @@ class SavedPost(BaseModel):
     excerpt: Optional[str] = None
     content_text: Optional[str] = None
     image_url: Optional[str] = None
+    audience: Optional[str] = None       # raw Substack audience tier, e.g. "everyone", "only_paid"
     is_paywalled: int = 0
     reading_time_minutes: Optional[int] = None
     word_count: Optional[int] = None
@@ -43,6 +44,7 @@ class PostSummary(BaseModel):
     saved_at: Optional[str] = None
     is_saved: int = 1
     excerpt: Optional[str] = None
+    audience: Optional[str] = None
     is_paywalled: int = 0
 
 
@@ -51,6 +53,13 @@ class PublicationSummary(BaseModel):
 
     publication_name: str
     publication_url: Optional[str] = None
+    post_count: int
+
+
+class AudienceSummary(BaseModel):
+    """Summary of an audience tier present in the local cache."""
+
+    audience: Optional[str] = None
     post_count: int
 
 

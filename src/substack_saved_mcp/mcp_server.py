@@ -8,6 +8,7 @@ from substack_saved_mcp.database import (
     get_post,
     get_status,
     init_db,
+    list_audiences as db_list_audiences,
     list_posts,
     list_publications as db_list_publications,
     search_posts,
@@ -15,6 +16,7 @@ from substack_saved_mcp.database import (
     upsert_post,
 )
 from substack_saved_mcp.models import (
+    AudienceSummary,
     PostSummary,
     PublicationSummary,
     SavedPost,
@@ -32,6 +34,7 @@ mcp = FastMCP("Substack Saved Posts")
 def search_saved_posts(
     query: str,
     publication: Optional[str] = None,
+    audience: Optional[str] = None,
     published_after: Optional[str] = None,
     published_before: Optional[str] = None,
     saved_after: Optional[str] = None,
@@ -41,12 +44,15 @@ def search_saved_posts(
     """Perform full-text FTS5 search across cached saved posts.
 
     Searches title, excerpt, publication name, author, and content text.
-    Allows filtering by publication name, original post date (published_at), and saved date (saved_at).
+    Allows filtering by publication name, audience tier (see list_audiences for
+    cached values, e.g. "everyone", "only_paid"), original post date
+    (published_at), and saved date (saved_at).
     """
     init_db()
     return search_posts(
         query=query,
         publication=publication,
+        audience=audience,
         published_after=published_after,
         published_before=published_before,
         saved_after=saved_after,
@@ -60,17 +66,20 @@ def list_saved_posts(
     limit: int = 20,
     offset: int = 0,
     publication: Optional[str] = None,
+    audience: Optional[str] = None,
     sort_by: str = "saved_at",
 ) -> List[PostSummary]:
-    """List cached saved posts with pagination and optional publication filter.
+    """List cached saved posts with pagination and optional publication/audience filters.
 
     sort_by can be 'saved_at' (when post was bookmarked) or 'published_at' (when post was published).
+    audience filters by tier (see list_audiences for cached values, e.g. "everyone", "only_paid").
     """
     init_db()
     return list_posts(
         limit=limit,
         offset=offset,
         publication=publication,
+        audience=audience,
         sort_by=sort_by,
         is_saved_only=True,
     )
@@ -84,16 +93,29 @@ def get_saved_post(url_or_id: str) -> Optional[SavedPost]:
 
 
 @mcp.tool()
-def save_post(url: str) -> SavedPost:
+def save_post(url: str) -> Dict[str, Any]:
     """Bookmark a Substack post remotely on Substack and save it to the local cache.
 
     Requires an active authenticated Substack session (run 'substack-saved-mcp login' if expired).
+    Remote confirmation is best-effort: Substack's bookmark button markup isn't
+    officially documented, so this detects whether the button's rendered state
+    provably changed after clicking. remote_confirmed=False means the post is
+    still cached locally, but the tool could not verify the bookmark was
+    actually created on Substack's side — a subsequent 'sync --force' will
+    correct the local cache if the remote save didn't actually happen.
     """
     init_db()
     client = SubstackSavedPostsClient()
-    saved_model = client.save_post(url)
+    saved_model, confirmation = client.save_post(url)
     updated_db_post = upsert_post(saved_model)
-    return updated_db_post
+    result: Dict[str, Any] = {
+        "success": True,
+        "post": updated_db_post,
+        "remote_confirmed": confirmation == "confirmed",
+    }
+    if confirmation != "confirmed":
+        result["warning"] = f"Could not confirm the bookmark toggle on Substack's page (status: {confirmation})."
+    return result
 
 
 @mcp.tool()
@@ -101,6 +123,9 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
     """Unbookmark a Substack post remotely and soft-delete it in local cache.
 
     Soft-deletion preserves post history while removing it from active search/list outputs.
+    Remote confirmation is best-effort (see save_post). remote_confirmed=False
+    means the post was still soft-deleted locally, but the tool could not
+    verify the unbookmark on Substack's side.
     """
     init_db()
     post = get_post(url_or_id)
@@ -108,19 +133,23 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
         return {"success": False, "message": f"Post '{url_or_id}' not found in local cache."}
 
     client = SubstackSavedPostsClient()
+    confirmation = "click_failed"
     try:
-        client.unsave_post(post.url)
+        confirmation = client.unsave_post(post.url)
     except AuthRequiredError as e:
         return {"success": False, "message": str(e)}
-    except Exception as e:
-        # Continue soft deletion locally even if remote unsave fails
-        pass
+    except Exception:
+        confirmation = "click_failed"  # Continue soft deletion locally even if remote unsave fails
 
     updated_post = soft_delete_post(post.url)
+    message = f"Successfully unsaved post '{post.title}' locally."
+    if confirmation != "confirmed":
+        message += f" Warning: could not confirm the removal on Substack's page (status: {confirmation})."
     return {
         "success": True,
-        "message": f"Successfully unsaved post '{post.title}'.",
+        "message": message,
         "post": updated_post,
+        "remote_confirmed": confirmation == "confirmed",
     }
 
 
@@ -129,6 +158,18 @@ def list_publications() -> List[PublicationSummary]:
     """List all publications in local cache with post counts."""
     init_db()
     return db_list_publications()
+
+
+@mcp.tool()
+def list_audiences() -> List[AudienceSummary]:
+    """List distinct audience tiers present in local cache with post counts.
+
+    Discovers actual values in use (e.g. "everyone", "only_paid") rather than a
+    hardcoded enum, since Substack's audience values aren't officially documented
+    and may vary or grow over time.
+    """
+    init_db()
+    return db_list_audiences()
 
 
 @mcp.tool()

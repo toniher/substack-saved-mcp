@@ -33,6 +33,7 @@ def test_cli_search_and_list(setup_cli_db):
         title="CLI Test Post",
         publication_name="CLI Times",
         excerpt="Testing CLI output rendering.",
+        audience="only_paid",
         is_saved=1,
     ), setup_cli_db)
 
@@ -42,7 +43,38 @@ def test_cli_search_and_list(setup_cli_db):
     assert res_list.exit_code == 0
     assert "CLI Test Post" in res_list.output
     assert "CLI Times" in res_list.output
+    assert "only_paid" in res_list.output
 
     res_search = runner.invoke(cli, ["search", "testing"])
     assert res_search.exit_code == 0
     assert "CLI Test Post" in res_search.output
+    assert "only_paid" in res_search.output
+
+
+def test_cli_audience_filter_and_command(setup_cli_db):
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/free-post",
+        title="Free Post",
+        publication_name="CLI Times",
+        audience="everyone",
+        is_saved=1,
+    ), setup_cli_db)
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/paid-post",
+        title="Paid Post",
+        publication_name="CLI Times",
+        audience="only_paid",
+        is_saved=1,
+    ), setup_cli_db)
+
+    runner = CliRunner()
+
+    res_filtered = runner.invoke(cli, ["list", "--audience", "only_paid"])
+    assert res_filtered.exit_code == 0
+    assert "Paid Post" in res_filtered.output
+    assert "Free Post" not in res_filtered.output
+
+    res_audiences = runner.invoke(cli, ["audiences"])
+    assert res_audiences.exit_code == 0
+    assert "everyone" in res_audiences.output
+    assert "only_paid" in res_audiences.output

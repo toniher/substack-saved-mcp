@@ -9,6 +9,7 @@ from typing import Generator, List, Optional, Tuple, Union
 
 from substack_saved_mcp.config import get_db_path
 from substack_saved_mcp.models import (
+    AudienceSummary,
     PostSummary,
     PublicationSummary,
     SavedPost,
@@ -43,6 +44,16 @@ def init_db(db_path: Optional[Path] = None) -> None:
     from substack_saved_mcp.config import ensure_app_dirs
     ensure_app_dirs()
     with get_db_connection(db_path) as conn:
+        # Add columns to a pre-existing posts table before the index below is
+        # created, since CREATE INDEX IF NOT EXISTS still fails on a missing column.
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(posts)")
+            existing_cols = {row["name"] for row in cursor.fetchall()}
+            if "audience" not in existing_cols:
+                conn.execute("ALTER TABLE posts ADD COLUMN audience TEXT")
+
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +70,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 excerpt TEXT,
                 content_text TEXT,
                 image_url TEXT,
+                audience TEXT,
                 is_paywalled INTEGER DEFAULT 0,
                 reading_time_minutes INTEGER,
                 word_count INTEGER,
@@ -72,6 +84,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_posts_saved_at ON posts(saved_at DESC);
             CREATE INDEX IF NOT EXISTS idx_posts_is_saved ON posts(is_saved);
             CREATE INDEX IF NOT EXISTS idx_posts_publication ON posts(publication_name);
+            CREATE INDEX IF NOT EXISTS idx_posts_audience ON posts(audience);
 
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,9 +160,9 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
             INSERT INTO posts (
                 substack_post_id, url, title, publication_name, publication_url,
                 author_name, published_at, saved_at, unsaved_at, is_saved,
-                excerpt, content_text, image_url, is_paywalled, reading_time_minutes,
+                excerpt, content_text, image_url, audience, is_paywalled, reading_time_minutes,
                 word_count, metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 substack_post_id = COALESCE(excluded.substack_post_id, posts.substack_post_id),
                 title = excluded.title,
@@ -163,6 +176,7 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
                 excerpt = COALESCE(excluded.excerpt, posts.excerpt),
                 content_text = COALESCE(excluded.content_text, posts.content_text),
                 image_url = COALESCE(excluded.image_url, posts.image_url),
+                audience = COALESCE(excluded.audience, posts.audience),
                 is_paywalled = excluded.is_paywalled,
                 reading_time_minutes = COALESCE(excluded.reading_time_minutes, posts.reading_time_minutes),
                 word_count = COALESCE(excluded.word_count, posts.word_count),
@@ -182,6 +196,7 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
             post.excerpt,
             post.content_text,
             post.image_url,
+            post.audience,
             post.is_paywalled,
             post.reading_time_minutes,
             post.word_count,
@@ -266,11 +281,12 @@ def list_posts(
     limit: int = 20,
     offset: int = 0,
     publication: Optional[str] = None,
+    audience: Optional[str] = None,
     sort_by: str = "saved_at",
     is_saved_only: bool = True,
     db_path: Optional[Path] = None,
 ) -> List[PostSummary]:
-    """List posts with pagination, publication filter, and sorting."""
+    """List posts with pagination, publication/audience filters, and sorting."""
     order_col = "published_at" if sort_by == "published_at" else "saved_at"
     where_clauses = []
     params: List[Union[str, int]] = []
@@ -280,11 +296,14 @@ def list_posts(
     if publication:
         where_clauses.append("LOWER(publication_name) LIKE LOWER(?)")
         params.append(f"%{publication}%")
+    if audience:
+        where_clauses.append("LOWER(audience) = LOWER(?)")
+        params.append(audience)
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     sql = f"""
         SELECT id, substack_post_id, url, title, publication_name, author_name,
-               published_at, saved_at, is_saved, excerpt, is_paywalled
+               published_at, saved_at, is_saved, excerpt, audience, is_paywalled
         FROM posts
         {where_sql}
         ORDER BY {order_col} DESC NULLS LAST
@@ -301,6 +320,7 @@ def list_posts(
 def search_posts(
     query: str,
     publication: Optional[str] = None,
+    audience: Optional[str] = None,
     published_after: Optional[str] = None,
     published_before: Optional[str] = None,
     saved_after: Optional[str] = None,
@@ -318,6 +338,9 @@ def search_posts(
     if publication:
         where_clauses.append("LOWER(p.publication_name) LIKE LOWER(?)")
         params.append(f"%{publication}%")
+    if audience:
+        where_clauses.append("LOWER(p.audience) = LOWER(?)")
+        params.append(audience)
     if published_after:
         where_clauses.append("p.published_at >= ?")
         params.append(published_after)
@@ -333,7 +356,7 @@ def search_posts(
 
     sql = f"""
         SELECT p.id, p.substack_post_id, p.url, p.title, p.publication_name, p.author_name,
-               p.published_at, p.saved_at, p.is_saved, p.excerpt, p.is_paywalled
+               p.published_at, p.saved_at, p.is_saved, p.excerpt, p.audience, p.is_paywalled
         FROM posts_fts fts
         JOIN posts p ON fts.rowid = p.id
         WHERE {' AND '.join(where_clauses)}
@@ -350,16 +373,21 @@ def search_posts(
         except sqlite3.OperationalError:
             # Fallback to standard LIKE if FTS query syntax is special/malformed
             like_query = f"%{query}%"
-            fallback_sql = """
+            fallback_where = ["(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)", "is_saved = 1"]
+            fallback_params: List[Union[str, int]] = [like_query, like_query, like_query, like_query]
+            if audience:
+                fallback_where.append("LOWER(audience) = LOWER(?)")
+                fallback_params.append(audience)
+            fallback_sql = f"""
                 SELECT id, substack_post_id, url, title, publication_name, author_name,
-                       published_at, saved_at, is_saved, excerpt, is_paywalled
+                       published_at, saved_at, is_saved, excerpt, audience, is_paywalled
                 FROM posts
-                WHERE (title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)
-                AND is_saved = 1
+                WHERE {' AND '.join(fallback_where)}
                 ORDER BY saved_at DESC
                 LIMIT ?
             """
-            cursor.execute(fallback_sql, (like_query, like_query, like_query, like_query, limit))
+            fallback_params.append(limit)
+            cursor.execute(fallback_sql, fallback_params)
             return [PostSummary(**dict(r)) for r in cursor.fetchall()]
 
 
@@ -376,6 +404,26 @@ def list_publications(db_path: Optional[Path] = None) -> List[PublicationSummary
         cursor = conn.cursor()
         cursor.execute(sql)
         return [PublicationSummary(**dict(r)) for r in cursor.fetchall()]
+
+
+def list_audiences(db_path: Optional[Path] = None) -> List[AudienceSummary]:
+    """Return distinct audience tiers present in cache with active saved post counts.
+
+    Discovers the actual values in use (e.g. "everyone", "only_paid") rather than
+    hardcoding Substack's audience enum, since it's not officially documented and
+    may grow (e.g. "only_founding", "preview").
+    """
+    sql = """
+        SELECT audience, COUNT(*) as post_count
+        FROM posts
+        WHERE is_saved = 1
+        GROUP BY audience
+        ORDER BY post_count DESC
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        return [AudienceSummary(**dict(r)) for r in cursor.fetchall()]
 
 
 def get_status(db_path: Optional[Path] = None) -> SavedPostsStatus:

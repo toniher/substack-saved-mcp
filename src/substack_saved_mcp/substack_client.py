@@ -356,16 +356,60 @@ class SubstackSavedPostsClient:
 
         return self._dom_cache[offset : offset + limit]
 
-    def save_post(self, url: str) -> SavedPost:
-        """Bookmark a post on Substack remotely and return extracted metadata."""
+    def _click_bookmark_toggle(self, page: Any) -> str:
+        """Click the save/bookmark toggle button on a post page and report confidence.
+
+        Substack's bookmark button markup isn't officially documented (unlike the
+        saved-list card markup captured from a real page for DOM extraction), so
+        this can only detect whether *something* about the button's rendered
+        state changed after the click — not that the intended direction (save
+        vs. unsave) is what actually happened.
+
+        Returns "confirmed" (button found, clicked, and its aria-label/aria-pressed/
+        class fingerprint changed), "unconfirmed" (found and clicked but no change
+        was detectable), "not_found" (no matching button on the page), or
+        "click_failed" (found but the click itself raised).
+        """
+        btn = page.locator("button[aria-label*='bookmark' i], button[aria-label*='save' i]").first
+        if btn.count() == 0:
+            return "not_found"
+
+        def _fingerprint():
+            try:
+                return (btn.get_attribute("aria-label"), btn.get_attribute("aria-pressed"), btn.get_attribute("class"))
+            except Exception:
+                return None
+
+        before = _fingerprint()
+        try:
+            btn.click(timeout=3000)
+        except Exception:
+            return "click_failed"
+
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+        after = _fingerprint()
+        if before is not None and after is not None and before != after:
+            return "confirmed"
+        return "unconfirmed"
+
+    def save_post(self, url: str) -> Tuple[SavedPost, str]:
+        """Bookmark a post on Substack remotely and return (extracted metadata, confirmation status).
+
+        confirmation is "confirmed", "unconfirmed", "not_found", or "click_failed" —
+        best-effort, since there's no documented way to verify the bookmark was
+        actually created server-side beyond the button's own rendered state.
+        """
         return _run_playwright_sync(self._save_post_impl, url=url)
 
-    def _save_post_impl(self, url: str) -> SavedPost:
+    def _save_post_impl(self, url: str, playwright_instance: Any = None) -> Tuple[SavedPost, str]:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
-        from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as p:
+        def _do_save(p):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(storage_state=str(self.state_path))
             page = context.new_page()
@@ -381,41 +425,49 @@ class SubstackSavedPostsClient:
             parsed = urlparse(clean_url)
             pub_name = parsed.netloc.split(".")[0].capitalize()
 
-            # Attempt clicking bookmark button if present
-            bookmark_btn = page.locator("button[aria-label*='bookmark' i], button[aria-label*='save' i]").first
-            if bookmark_btn.count() > 0:
-                try:
-                    bookmark_btn.click(timeout=3000)
-                except Exception:
-                    pass
+            toggle_status = self._click_bookmark_toggle(page)
 
-            # Also issue API request if post ID is found
-            api_context = p.request.new_context(storage_state=str(self.state_path))
-            # Try bookmark endpoint
-            api_context.post(f"https://substack.com/api/v1/bookmark", data={"url": clean_url})
+            # Also issue API request as a second, independent confirmation channel.
+            api_confirmed = False
+            try:
+                api_context = p.request.new_context(storage_state=str(self.state_path))
+                api_response = api_context.post("https://substack.com/api/v1/bookmark", data={"url": clean_url})
+                api_confirmed = bool(getattr(api_response, "ok", False))
+            except Exception:
+                pass
 
             # Save updated storage state
             context.storage_state(path=str(self.state_path))
             browser.close()
 
-        return SavedPost(
-            url=clean_url,
-            title=title,
-            publication_name=pub_name,
-            publication_url=f"{parsed.scheme}://{parsed.netloc}",
-            is_saved=1,
-        )
+            confirmation = "confirmed" if (toggle_status == "confirmed" or api_confirmed) else toggle_status
+            saved_post = SavedPost(
+                url=clean_url,
+                title=title,
+                publication_name=pub_name,
+                publication_url=f"{parsed.scheme}://{parsed.netloc}",
+                is_saved=1,
+            )
+            return saved_post, confirmation
 
-    def unsave_post(self, url: str) -> bool:
-        """Unbookmark a post on Substack remotely."""
+        if playwright_instance is not None:
+            return _do_save(playwright_instance)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return _do_save(p)
+
+    def unsave_post(self, url: str) -> str:
+        """Unbookmark a post on Substack remotely; returns a confirmation status.
+
+        See ``_click_bookmark_toggle`` for the meaning of the returned status.
+        """
         return _run_playwright_sync(self._unsave_post_impl, url=url)
 
-    def _unsave_post_impl(self, url: str) -> bool:
+    def _unsave_post_impl(self, url: str, playwright_instance: Any = None) -> str:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
-        from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as p:
+        def _do_unsave(p):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(storage_state=str(self.state_path))
             page = context.new_page()
@@ -426,16 +478,15 @@ class SubstackSavedPostsClient:
                 browser.close()
                 raise AuthRequiredError("Session expired during unsave. Please run 'substack-saved-mcp login'.")
 
-            # Attempt clicking bookmark/unbookmark button if present
-            bookmark_btn = page.locator("button[aria-label*='bookmark' i], button[aria-label*='save' i]").first
-            if bookmark_btn.count() > 0:
-                try:
-                    bookmark_btn.click(timeout=3000)
-                except Exception:
-                    pass
+            toggle_status = self._click_bookmark_toggle(page)
 
             # Save updated state
             context.storage_state(path=str(self.state_path))
             browser.close()
+            return toggle_status
 
-        return True
+        if playwright_instance is not None:
+            return _do_unsave(playwright_instance)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return _do_unsave(p)

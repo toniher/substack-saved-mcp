@@ -11,6 +11,7 @@ from substack_saved_mcp.database import (
     get_post,
     get_status,
     init_db,
+    list_audiences as db_list_audiences,
     list_posts as db_list_posts,
     list_publications as db_list_publications,
     search_posts as db_search_posts,
@@ -87,11 +88,18 @@ def save(url: str) -> None:
     click.echo(f"Saving post: {url}...")
     client = SubstackSavedPostsClient()
     try:
-        post = client.save_post(url)
+        post, confirmation = client.save_post(url)
         saved_db_post = upsert_post(post)
         click.secho(f"Successfully saved '{saved_db_post.title}' to local cache!", fg="green")
         click.echo(f"Published at: {saved_db_post.published_at or 'N/A'}")
         click.echo(f"Saved at: {saved_db_post.saved_at}")
+        if confirmation != "confirmed":
+            click.secho(
+                f"Warning: could not confirm the bookmark was saved on Substack's own page "
+                f"(status: {confirmation}). Cached locally regardless; a future 'sync --force' "
+                "will correct it if the remote save didn't actually happen.",
+                fg="yellow",
+            )
     except AuthRequiredError as e:
         click.secho(f"Authentication required: {e}", fg="yellow")
     except Exception as e:
@@ -110,24 +118,32 @@ def unsave(url_or_id: str) -> None:
 
     click.echo(f"Unsaving post '{post.title}'...")
     client = SubstackSavedPostsClient()
+    confirmation = "click_failed"
     try:
-        client.unsave_post(post.url)
+        confirmation = client.unsave_post(post.url)
     except Exception as e:
         click.echo(f"Remote unsave notice: {e}")
 
     updated = soft_delete_post(post.url)
     if updated:
         click.secho(f"Successfully unsaved '{post.title}' from local cache.", fg="green")
+        if confirmation != "confirmed":
+            click.secho(
+                f"Warning: could not confirm the bookmark was removed on Substack's own page "
+                f"(status: {confirmation}).",
+                fg="yellow",
+            )
 
 
 @cli.command()
 @click.argument("query")
 @click.option("--publication", help="Filter by publication name.")
+@click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
 @click.option("--limit", default=10, help="Maximum search results.")
-def search(query: str, publication: Optional[str], limit: int) -> None:
+def search(query: str, publication: Optional[str], audience: Optional[str], limit: int) -> None:
     """Perform full-text search across cached saved posts."""
     init_db()
-    results = db_search_posts(query=query, publication=publication, limit=limit)
+    results = db_search_posts(query=query, publication=publication, audience=audience, limit=limit)
     if not results:
         click.echo(f"No saved posts matched query '{query}'.")
         return
@@ -137,6 +153,7 @@ def search(query: str, publication: Optional[str], limit: int) -> None:
         click.secho(f"{idx}. {p.title}", fg="cyan", bold=True)
         click.echo(f"   Publication : {p.publication_name}")
         click.echo(f"   Published   : {p.published_at or 'N/A'} | Saved: {p.saved_at or 'N/A'}")
+        click.echo(f"   Audience    : {p.audience or 'N/A'}")
         click.echo(f"   URL         : {p.url}")
         if p.excerpt:
             click.echo(f"   Excerpt     : {p.excerpt[:120]}...")
@@ -147,11 +164,12 @@ def search(query: str, publication: Optional[str], limit: int) -> None:
 @click.option("--limit", default=10, help="Number of posts to display.")
 @click.option("--offset", default=0, help="Pagination offset.")
 @click.option("--publication", help="Filter by publication name.")
+@click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
 @click.option("--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at")
-def list_cmd(limit: int, offset: int, publication: Optional[str], sort_by: str) -> None:
+def list_cmd(limit: int, offset: int, publication: Optional[str], audience: Optional[str], sort_by: str) -> None:
     """List saved posts ordered by saved date or publication date."""
     init_db()
-    posts = db_list_posts(limit=limit, offset=offset, publication=publication, sort_by=sort_by)
+    posts = db_list_posts(limit=limit, offset=offset, publication=publication, audience=audience, sort_by=sort_by)
     if not posts:
         click.echo("No saved posts found.")
         return
@@ -159,7 +177,7 @@ def list_cmd(limit: int, offset: int, publication: Optional[str], sort_by: str) 
     click.echo(f"Saved Posts ({len(posts)} displayed):\n")
     for idx, p in enumerate(posts, offset + 1):
         click.secho(f"{idx}. {p.title}", fg="cyan")
-        click.echo(f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'}")
+        click.echo(f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}")
         click.echo(f"   URL: {p.url}\n")
 
 
@@ -175,6 +193,20 @@ def publications() -> None:
     click.echo(f"Cached Publications ({len(pubs)} total):\n")
     for p in pubs:
         click.echo(f"- {p.publication_name} ({p.post_count} saved post{'s' if p.post_count != 1 else ''})")
+
+
+@cli.command()
+def audiences() -> None:
+    """List all audience tiers present in the cache (e.g. everyone, only_paid)."""
+    init_db()
+    tiers = db_list_audiences()
+    if not tiers:
+        click.echo("No posts in cache.")
+        return
+
+    click.echo(f"Cached Audience Tiers ({len(tiers)} total):\n")
+    for t in tiers:
+        click.echo(f"- {t.audience or 'unknown'} ({t.post_count} saved post{'s' if t.post_count != 1 else ''})")
 
 
 @cli.command()
