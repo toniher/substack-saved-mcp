@@ -141,11 +141,33 @@ def unsave(url_or_id: str) -> None:
 @click.argument("query")
 @click.option("--publication", help="Filter by publication name.")
 @click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
+@click.option("--published-after", help="Only posts published on/after this ISO-8601 date (e.g. 2026-01-01).")
+@click.option("--published-before", help="Only posts published on/before this ISO-8601 date.")
+@click.option("--saved-after", help="Only posts bookmarked on/after this ISO-8601 date.")
+@click.option("--saved-before", help="Only posts bookmarked on/before this ISO-8601 date.")
 @click.option("--limit", default=10, help="Maximum search results.")
-def search(query: str, publication: Optional[str], audience: Optional[str], limit: int) -> None:
+def search(
+    query: str,
+    publication: Optional[str],
+    audience: Optional[str],
+    published_after: Optional[str],
+    published_before: Optional[str],
+    saved_after: Optional[str],
+    saved_before: Optional[str],
+    limit: int,
+) -> None:
     """Perform full-text search across cached saved posts."""
     init_db()
-    results = db_search_posts(query=query, publication=publication, audience=audience, limit=limit)
+    results = db_search_posts(
+        query=query,
+        publication=publication,
+        audience=audience,
+        published_after=published_after,
+        published_before=published_before,
+        saved_after=saved_after,
+        saved_before=saved_before,
+        limit=limit,
+    )
     if not results:
         click.echo(f"No saved posts matched query '{query}'.")
         return
@@ -156,9 +178,13 @@ def search(query: str, publication: Optional[str], audience: Optional[str], limi
         click.echo(f"   Publication : {p.publication_name}")
         click.echo(f"   Published   : {p.published_at or 'N/A'} | Saved: {p.saved_at or 'N/A'}")
         click.echo(f"   Audience    : {p.audience or 'N/A'}")
+        if p.reading_time_minutes or p.word_count:
+            click.echo(f"   Reading time: {p.reading_time_minutes or '?'} min ({p.word_count or '?'} words)")
         click.echo(f"   URL         : {p.url}")
         if p.excerpt:
             click.echo(f"   Excerpt     : {p.excerpt[:120]}...")
+        if p.image_url:
+            click.echo(f"   Image       : {p.image_url}")
         click.echo("")
 
 
@@ -178,8 +204,9 @@ def list_cmd(limit: int, offset: int, publication: Optional[str], audience: Opti
 
     click.echo(f"Saved Posts ({len(posts)} displayed):\n")
     for idx, p in enumerate(posts, offset + 1):
+        reading = f" | {p.reading_time_minutes} min ({p.word_count} words)" if p.reading_time_minutes else ""
         click.secho(f"{idx}. {p.title}", fg="cyan")
-        click.echo(f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}")
+        click.echo(f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}{reading}")
         click.echo(f"   URL: {p.url}\n")
 
 

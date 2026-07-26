@@ -26,7 +26,6 @@ class SavedPost(BaseModel):
     is_paywalled: int = 0
     reading_time_minutes: Optional[int] = None
     word_count: Optional[int] = None
-    metadata_json: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -44,8 +43,11 @@ class PostSummary(BaseModel):
     saved_at: Optional[str] = None
     is_saved: int = 1
     excerpt: Optional[str] = None
+    image_url: Optional[str] = None
     audience: Optional[str] = None
     is_paywalled: int = 0
+    reading_time_minutes: Optional[int] = None
+    word_count: Optional[int] = None
 
 
 class PublicationSummary(BaseModel):

@@ -107,6 +107,79 @@ def test_cli_get_content_fetches_and_caches(setup_cli_db):
     assert cached.content_text == "Full text here."
 
 
+def test_cli_list_and_search_show_reading_time(setup_cli_db):
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/long-read",
+        title="Long Read",
+        publication_name="CLI Times",
+        excerpt="A lengthy essay worth your time.",
+        word_count=850,
+        reading_time_minutes=5,
+        is_saved=1,
+    ), setup_cli_db)
+
+    runner = CliRunner()
+
+    res_list = runner.invoke(cli, ["list"])
+    assert res_list.exit_code == 0
+    assert "5 min" in res_list.output
+    assert "850 words" in res_list.output
+
+    res_search = runner.invoke(cli, ["search", "essay"])
+    assert res_search.exit_code == 0
+    assert "5 min" in res_search.output
+
+
+def test_cli_search_shows_image_url_but_list_omits_it(setup_cli_db):
+    """image_url is shown in 'search' detail output but deliberately left out of
+    the terser 'list' output, since it's a long, uninformative CDN URL there."""
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/with-image",
+        title="Post With Image",
+        publication_name="CLI Times",
+        excerpt="Has a thumbnail worth noting.",
+        image_url="https://substackcdn.com/image/fetch/example.jpeg",
+        is_saved=1,
+    ), setup_cli_db)
+
+    runner = CliRunner()
+
+    res_list = runner.invoke(cli, ["list"])
+    assert res_list.exit_code == 0
+    assert "https://substackcdn.com/image/fetch/example.jpeg" not in res_list.output
+
+    res_search = runner.invoke(cli, ["search", "thumbnail"])
+    assert res_search.exit_code == 0
+    assert "https://substackcdn.com/image/fetch/example.jpeg" in res_search.output
+
+
+def test_cli_search_date_range_filters(setup_cli_db):
+    """The 'search' command exposes the same published/saved date-range filters
+    the DB and MCP layers already support."""
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/old",
+        title="Old Essay",
+        publication_name="CLI Times",
+        excerpt="shared keyword essay",
+        published_at="2025-01-01T00:00:00Z",
+        is_saved=1,
+    ), setup_cli_db)
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/new",
+        title="New Essay",
+        publication_name="CLI Times",
+        excerpt="shared keyword essay",
+        published_at="2026-06-01T00:00:00Z",
+        is_saved=1,
+    ), setup_cli_db)
+
+    runner = CliRunner()
+    res = runner.invoke(cli, ["search", "essay", "--published-after", "2026-01-01"])
+    assert res.exit_code == 0
+    assert "New Essay" in res.output
+    assert "Old Essay" not in res.output
+
+
 def test_cli_get_content_not_found(setup_cli_db):
     runner = CliRunner()
     res = runner.invoke(cli, ["get-content", "https://cli.substack.com/p/missing"])

@@ -74,7 +74,6 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 is_paywalled INTEGER DEFAULT 0,
                 reading_time_minutes INTEGER,
                 word_count INTEGER,
-                metadata_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -161,8 +160,8 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
                 substack_post_id, url, title, publication_name, publication_url,
                 author_name, published_at, saved_at, unsaved_at, is_saved,
                 excerpt, content_text, image_url, audience, is_paywalled, reading_time_minutes,
-                word_count, metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                word_count, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 substack_post_id = COALESCE(excluded.substack_post_id, posts.substack_post_id),
                 title = excluded.title,
@@ -180,7 +179,6 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
                 is_paywalled = excluded.is_paywalled,
                 reading_time_minutes = COALESCE(excluded.reading_time_minutes, posts.reading_time_minutes),
                 word_count = COALESCE(excluded.word_count, posts.word_count),
-                metadata_json = COALESCE(excluded.metadata_json, posts.metadata_json),
                 updated_at = excluded.updated_at
         """, (
             post.substack_post_id,
@@ -200,7 +198,6 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
             post.is_paywalled,
             post.reading_time_minutes,
             post.word_count,
-            post.metadata_json,
             created_at,
             now_iso,
         ))
@@ -303,7 +300,8 @@ def list_posts(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     sql = f"""
         SELECT id, substack_post_id, url, title, publication_name, author_name,
-               published_at, saved_at, is_saved, excerpt, audience, is_paywalled
+               published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
+               reading_time_minutes, word_count
         FROM posts
         {where_sql}
         ORDER BY {order_col} DESC NULLS LAST
@@ -356,7 +354,8 @@ def search_posts(
 
     sql = f"""
         SELECT p.id, p.substack_post_id, p.url, p.title, p.publication_name, p.author_name,
-               p.published_at, p.saved_at, p.is_saved, p.excerpt, p.audience, p.is_paywalled
+               p.published_at, p.saved_at, p.is_saved, p.excerpt, p.image_url, p.audience, p.is_paywalled,
+               p.reading_time_minutes, p.word_count
         FROM posts_fts fts
         JOIN posts p ON fts.rowid = p.id
         WHERE {' AND '.join(where_clauses)}
@@ -380,7 +379,8 @@ def search_posts(
                 fallback_params.append(audience)
             fallback_sql = f"""
                 SELECT id, substack_post_id, url, title, publication_name, author_name,
-                       published_at, saved_at, is_saved, excerpt, audience, is_paywalled
+                       published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
+                       reading_time_minutes, word_count
                 FROM posts
                 WHERE {' AND '.join(fallback_where)}
                 ORDER BY saved_at DESC

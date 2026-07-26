@@ -367,3 +367,95 @@ def test_reader_api_cursor_pagination(tmp_path: Path):
     assert posts[0]["publication"]["name"] == "Pub A"
     assert posts[0]["author_name"] == "Alice"
 
+
+class _RetryResponse:
+    """Minimal reader-API response double with status/headers/json."""
+
+    def __init__(self, status=200, payload=None, headers=None):
+        self.status = status
+        self.ok = 200 <= status < 300
+        self.url = "https://substack.com/api/v1/reader/posts"
+        self._payload = payload if payload is not None else {"posts": [], "more": False}
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+def _reader_client(tmp_path: Path) -> SubstackSavedPostsClient:
+    state_file = tmp_path / "storage_state.json"
+    state_file.write_text('{"cookies": [], "origins": []}')
+    return SubstackSavedPostsClient(storage_state_path=state_file)
+
+
+def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
+    """A 429 with a Retry-After header is retried (after honoring the header delay)
+    rather than being silently treated as an empty/unavailable saved list."""
+    ok_payload = {
+        "posts": [{
+            "id": 1, "publication_id": 10, "title": "P1",
+            "canonical_url": "https://a.substack.com/p/one",
+            "saved_at": "2026-06-20T00:00:00Z",
+        }],
+        "publications": [{"id": 10, "name": "Pub A"}],
+        "more": False,
+    }
+    responses = [
+        _RetryResponse(status=429, headers={"retry-after": "2"}),
+        _RetryResponse(status=200, payload=ok_payload),
+    ]
+
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            res = responses[self.calls]
+            self.calls += 1
+            return res
+
+    slept: List[float] = []
+    client = _reader_client(tmp_path)
+    posts = client._fetch_all_saved_via_reader_api(
+        MockApiContext(), page_size=2, sleep_func=slept.append
+    )
+
+    assert [p["id"] for p in posts] == [1]
+    assert slept == [2.0]  # honored the Retry-After header value
+
+
+def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
+    """A 429 that never clears is treated as 'unavailable' (returns None so the
+    caller can fall back), not as an empty success."""
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            self.calls += 1
+            return _RetryResponse(status=429)  # no Retry-After -> backoff
+
+        _seen = None
+
+    ctx = MockApiContext()
+    slept: List[float] = []
+    client = _reader_client(tmp_path)
+    result = client._fetch_all_saved_via_reader_api(
+        ctx, page_size=2, max_retries=3, sleep_func=slept.append
+    )
+
+    assert result is None  # nothing fetched -> signal DOM fallback
+    assert ctx.calls == 4  # 1 initial + 3 retries
+    assert slept == [0.5, 1.0, 2.0]  # capped exponential backoff
+
+
+def test_retry_after_seconds_caps_and_falls_back(tmp_path: Path):
+    client = _reader_client(tmp_path)
+    # Honors an integer Retry-After, clamped to the cap.
+    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "5"}), 0) == 5.0
+    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "999"}), 0) == 30.0
+    # Unparseable (e.g. HTTP-date) -> exponential backoff by attempt number.
+    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 2) == 2.0
+    # No header at all -> backoff.
+    assert client._retry_after_seconds(_RetryResponse(), 1) == 1.0
+

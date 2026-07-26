@@ -20,6 +20,24 @@ from substack_saved_mcp.url_utils import canonicalize_url
 
 logger = logging.getLogger(__name__)
 
+# Rough average adult reading speed used to derive reading time from word count.
+WORDS_PER_MINUTE = 200
+
+
+def _first_positive_int(source: Dict[str, Any], *keys: str) -> Optional[int]:
+    """Return the first of ``keys`` whose value coerces to a positive int, else None."""
+    for key in keys:
+        val = source.get(key)
+        if val is None:
+            continue
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
 
 def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
     """Parse raw Substack API JSON payload or DOM dict into a typed SavedPost object."""
@@ -63,6 +81,17 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
     audience = post_obj.get("audience")
     is_paywalled = 1 if audience == "only_paid" or post_obj.get("is_paywalled") else 0
 
+    # Word count: Substack's exact reader-API field name isn't confirmed, so map the
+    # most likely candidates defensively (verify with `inspect-network` if these stay
+    # empty). Reading time is *derived* from word count rather than read from a field,
+    # since a wrong guess about that field's unit (seconds vs minutes) would store a
+    # badly wrong value — deriving at ~WPM is unambiguous and is how Substack itself
+    # presents it.
+    word_count = _first_positive_int(post_obj, "wordcount", "word_count", "words")
+    reading_time_minutes = (
+        -(-word_count // WORDS_PER_MINUTE) if word_count else None  # ceil division, min 1
+    )
+
     return SavedPost(
         substack_post_id=substack_id,
         url=clean_url,
@@ -78,6 +107,8 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
         image_url=image_url,
         audience=audience,
         is_paywalled=is_paywalled,
+        word_count=word_count,
+        reading_time_minutes=reading_time_minutes,
     )
 
 

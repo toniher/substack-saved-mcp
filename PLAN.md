@@ -109,7 +109,7 @@ Use SQLite with FTS5 enabled from initial setup to provide fast full-text search
 | `is_paywalled` | INTEGER | Boolean flag (0 = free, 1 = paywalled) |
 | `reading_time_minutes` | INTEGER | Optional estimated reading time |
 | `word_count` | INTEGER | Optional word count |
-| `metadata_json` | TEXT | Raw sanitized source JSON retained for future migrations |
+| `metadata_json` | TEXT | ~~Raw sanitized source JSON retained for future migrations~~ **Removed during implementation** — was never populated; the model and schema no longer include it (pre-existing DBs tolerate the leftover inert column). |
 | `created_at` | TEXT | Local record insertion timestamp (ISO-8601) |
 | `updated_at` | TEXT | Local record update timestamp (ISO-8601) |
 

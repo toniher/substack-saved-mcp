@@ -183,7 +183,11 @@ def test_list_audiences(temp_db: Path):
 
 def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
     """A DB created before the audience column existed must not break init_db,
-    since CREATE INDEX IF NOT EXISTS on a missing column raises OperationalError."""
+    since CREATE INDEX IF NOT EXISTS on a missing column raises OperationalError.
+
+    This legacy schema also still has the (since-removed) metadata_json column, so
+    the get_post below doubles as a regression check that a leftover column absent
+    from the SavedPost model is tolerated on read (Pydantic ignores unknown keys)."""
     import sqlite3
 
     old_db_path = tmp_path / "old_schema.sqlite"
@@ -222,6 +226,20 @@ def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
     post = get_post("https://old.substack.com/p/pre-existing", old_db_path)
     assert post is not None
     assert post.audience is None
+
+
+def test_image_url_surfaced_in_list_and_search(temp_db: Path):
+    upsert_post(SavedPost(
+        url="https://pub1.com/p/with-image", title="Post With Image", publication_name="Pub One",
+        excerpt="some searchable text", image_url="https://substackcdn.com/image/fetch/example.jpeg",
+        is_saved=1,
+    ), temp_db)
+
+    listed = list_posts(db_path=temp_db)
+    assert listed[0].image_url == "https://substackcdn.com/image/fetch/example.jpeg"
+
+    searched = search_posts("searchable", db_path=temp_db)
+    assert searched[0].image_url == "https://substackcdn.com/image/fetch/example.jpeg"
 
 
 def test_list_publications(temp_db: Path):

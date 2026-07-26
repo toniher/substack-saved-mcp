@@ -3,6 +3,7 @@
 import concurrent.futures
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -162,15 +163,59 @@ class SubstackSavedPostsClient:
             # Fallback: headless DOM extraction on https://substack.com/saved
             return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
 
+    @staticmethod
+    def _retry_after_seconds(res: Any, attempt: int, cap: float = 30.0) -> float:
+        """Compute how long to wait before retrying a throttled/failed reader-API request.
+
+        Honors the ``Retry-After`` response header when it's an integer number of
+        seconds (the form Substack/most APIs send), clamped to ``cap`` so a hostile
+        or absurd value can't hang the sync. Falls back to capped exponential
+        backoff (0.5s, 1s, 2s, ...) when the header is absent or unparseable.
+        """
+        headers = getattr(res, "headers", None) or {}
+        raw = headers.get("retry-after")
+        if raw is not None:
+            try:
+                return min(float(int(str(raw).strip())), cap)
+            except (ValueError, TypeError):
+                pass  # Not an integer (possibly an HTTP-date); use backoff instead.
+        return min(0.5 * (2 ** attempt), cap)
+
+    def _reader_api_get(
+        self, api_context: Any, url: str, max_retries: int = 3, sleep_func=time.sleep
+    ) -> Any:
+        """GET a reader-API URL, retrying on 429/5xx with Retry-After-aware backoff.
+
+        Only transient statuses (429 Too Many Requests and 5xx server errors) are
+        retried. Auth failures (401/403) and other 4xx are returned unretried so the
+        caller's existing handling (raise ``AuthRequiredError`` / fall back) applies.
+        """
+        res = api_context.get(url)
+        attempts = 0
+        while (res.status == 429 or 500 <= res.status < 600) and attempts < max_retries:
+            delay = self._retry_after_seconds(res, attempts)
+            logger.warning(
+                f"Reader inbox API returned {res.status}; backing off {delay}s "
+                f"before retry {attempts + 1}/{max_retries}."
+            )
+            sleep_func(delay)
+            attempts += 1
+            res = api_context.get(url)
+        return res
+
     def _fetch_all_saved_via_reader_api(
-        self, api_context: Any, page_size: int = 20, max_posts: int = 2000
+        self, api_context: Any, page_size: int = 20, max_posts: int = 2000,
+        max_retries: int = 3, sleep_func=time.sleep,
     ) -> Optional[List[Dict[str, Any]]]:
         """Fetch the full saved list from the reader inbox API via cursor pagination.
 
         Returns a list of enriched post dicts (each carrying its real ``saved_at``,
         ISO ``post_date``, and an attached ``publication`` object), or ``None`` if the
         endpoint is unavailable so the caller can fall back to DOM extraction. Raises
-        ``AuthRequiredError`` when the session is expired.
+        ``AuthRequiredError`` when the session is expired. Transient 429/5xx responses
+        are retried with ``Retry-After``-aware backoff (see ``_reader_api_get``); a
+        429 that survives all retries is treated as "unavailable" (partial list or
+        DOM fallback) rather than as silent success.
         """
         from urllib.parse import quote
 
@@ -186,7 +231,9 @@ class SubstackSavedPostsClient:
                 f"&limit={page_size}&after={quote(cursor)}"
             )
 
-            res = api_context.get(url)
+            res = self._reader_api_get(
+                api_context, url, max_retries=max_retries, sleep_func=sleep_func
+            )
             if res.status in (401, 403) or "sign-in" in res.url:
                 raise AuthRequiredError(
                     "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."

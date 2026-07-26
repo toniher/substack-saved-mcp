@@ -4,7 +4,7 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 
 ## Features
 
-- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, publications, and content. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`).
+- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, and publications. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`). Search also covers a post's **full body text**, but only for posts whose content has already been fetched once via `get-content` / the `get_post_content` tool — a normal `sync` stores metadata and excerpts, not full bodies, so posts you haven't opened yet are matched on their title/excerpt/metadata only, not their full text.
 - **Full Content for LLMs**: Fetch a saved post's full content and get it back cleaned and formatted (headings, lists, links) for feeding directly to an LLM, with the result cached locally for next time.
 - **Save & Unsave**: Bookmark new Substack posts or unbookmark existing ones via authenticated browser sessions.
 - **Offline First**: Fast, offline queries directly from local SQLite cache.
