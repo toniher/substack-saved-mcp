@@ -7,6 +7,7 @@ from typing import Optional
 
 import click
 
+from substack_saved_mcp.content_utils import format_post_for_llm, html_to_llm_text
 from substack_saved_mcp.database import (
     get_post,
     get_status,
@@ -221,6 +222,71 @@ def status() -> None:
     click.echo(f"Total Publications  : {st.total_publications}")
     click.echo(f"Last Successful Sync: {st.last_successful_sync or 'Never'}")
     click.echo(f"Last Sync Status    : {st.last_sync_status or 'N/A'}")
+
+
+@cli.command(name="get-content")
+@click.argument("url_or_id")
+@click.option("--no-cache", is_flag=True, help="Don't store the fetched content in the local cache.")
+def get_content(url_or_id: str, no_cache: bool) -> None:
+    """Fetch a saved post's full content and print it formatted for an LLM.
+
+    Uses the cached content_text if a previous fetch already stored it;
+    otherwise fetches the post's page and caches the result unless --no-cache
+    is given.
+    """
+    init_db()
+    post = get_post(url_or_id)
+    if not post:
+        click.secho(f"Post '{url_or_id}' not found in local cache.", fg="yellow")
+        return
+
+    if post.content_text:
+        click.echo(format_post_for_llm(
+            title=post.title,
+            publication_name=post.publication_name,
+            url=post.url,
+            body_text=post.content_text,
+            author_name=post.author_name,
+            published_at=post.published_at,
+        ))
+        return
+
+    click.echo(f"Fetching full content for '{post.title}'...", err=True)
+    client = SubstackSavedPostsClient()
+    try:
+        result = client.fetch_post_content(post.url)
+    except AuthRequiredError as e:
+        click.secho(f"Authentication required: {e}", fg="yellow")
+        return
+    except Exception as e:
+        click.secho(f"Error fetching content: {e}", fg="red")
+        return
+
+    body_html = result.get("body_html")
+    if not body_html:
+        click.secho(
+            "Could not find this post's full content on its page (Substack may have "
+            "changed how it embeds it, or this post is paywalled beyond your account's "
+            "access). Run 'substack-saved-mcp inspect-network' while opening this "
+            f"post ({post.url}) in the browser so we can capture the real content "
+            "source, then this command can be updated.",
+            fg="yellow",
+        )
+        return
+
+    body_text = html_to_llm_text(body_html)
+    if not no_cache:
+        post.content_text = body_text
+        post = upsert_post(post)
+
+    click.echo(format_post_for_llm(
+        title=post.title,
+        publication_name=post.publication_name,
+        url=post.url,
+        body_text=body_text,
+        author_name=post.author_name,
+        published_at=post.published_at,
+    ))
 
 
 @cli.command()

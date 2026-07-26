@@ -6,6 +6,7 @@ import pytest
 
 from substack_saved_mcp.database import init_db, upsert_post
 from substack_saved_mcp.mcp_server import (
+    get_post_content,
     get_saved_post,
     get_post_resource,
     get_publications_resource,
@@ -133,6 +134,58 @@ def test_mcp_unsave_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
     # Local soft-delete must still have happened despite the unconfirmed remote state.
     post_after = get_saved_post(saved.url)
     assert post_after.is_saved == 0
+
+
+def test_mcp_get_post_content_not_found(setup_test_db: Path):
+    res = get_post_content("https://missing.substack.com/p/nope")
+    assert res["success"] is False
+    assert "not found" in res["message"]
+
+
+def test_mcp_get_post_content_fetches_and_caches(setup_test_db: Path):
+    p = SavedPost(
+        url="https://test.substack.com/p/full-content",
+        title="Full Content Post",
+        publication_name="Test Pub",
+        is_saved=1,
+    )
+    saved = upsert_post(p, setup_test_db)
+
+    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.fetch_post_content.return_value = {
+            "body_html": "<p>Hello world.</p>",
+            "title": "Full Content Post",
+            "audience": "everyone",
+        }
+        res = get_post_content(saved.url)
+        assert res["success"] is True
+        assert res["cached"] is False
+        assert "Hello world." in res["content"]
+        assert "Title: Full Content Post" in res["content"]
+
+    # Second call should use the now-cached content_text without calling the client again.
+    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+        res2 = get_post_content(saved.url)
+        assert res2["success"] is True
+        assert res2["cached"] is True
+        assert "Hello world." in res2["content"]
+        mock_client_cls.return_value.fetch_post_content.assert_not_called()
+
+
+def test_mcp_get_post_content_reports_missing_body(setup_test_db: Path):
+    p = SavedPost(
+        url="https://test.substack.com/p/no-body",
+        title="No Body Post",
+        publication_name="Test Pub",
+        is_saved=1,
+    )
+    saved = upsert_post(p, setup_test_db)
+
+    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.fetch_post_content.return_value = {"body_html": None}
+        res = get_post_content(saved.url)
+        assert res["success"] is False
+        assert "inspect-network" in res["message"]
 
 
 def test_mcp_save_tool_surfaces_unconfirmed_warning(setup_test_db: Path):

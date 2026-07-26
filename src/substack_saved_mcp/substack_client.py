@@ -482,6 +482,55 @@ class SubstackSavedPostsClient:
         with sync_playwright() as p:
             return _do_save(p)
 
+    def fetch_post_content(self, url: str) -> Dict[str, Any]:
+        """Fetch a post's full body HTML by visiting its page.
+
+        Reads ``window._preloads.post.body_html`` (the same server-rendered
+        blob already relied on by ``save_post`` for title/audience/description),
+        which is Substack's field name for full post content — ``parse_remote_post``
+        already expects a ``body_html`` key from the API for this reason. Returns a
+        dict with ``body_html`` (``None`` if not found on the page, e.g. the embed
+        format changed or the post is paywalled beyond this account's access) plus
+        the post's ``title`` and ``audience`` as read from the same blob.
+        """
+        return _run_playwright_sync(self._fetch_post_content_impl, url=url)
+
+    def _fetch_post_content_impl(self, url: str, playwright_instance: Any = None) -> Dict[str, Any]:
+        self._ensure_authenticated()
+        clean_url = canonicalize_url(url)
+
+        def _do_fetch(p):
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(storage_state=str(self.state_path))
+            page = context.new_page()
+
+            page.goto(clean_url, wait_until="domcontentloaded")
+
+            if "sign-in" in page.url:
+                browser.close()
+                raise AuthRequiredError("Session expired while fetching content. Please run 'substack-saved-mcp login'.")
+
+            preloads = None
+            try:
+                preloads = page.evaluate("() => window._preloads")
+            except Exception:
+                pass
+
+            browser.close()
+
+            post_obj = (preloads or {}).get("post") or {}
+            return {
+                "body_html": post_obj.get("body_html"),
+                "title": post_obj.get("title"),
+                "audience": post_obj.get("audience"),
+            }
+
+        if playwright_instance is not None:
+            return _do_fetch(playwright_instance)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return _do_fetch(p)
+
     def unsave_post(self, url: str, post_id: Optional[int] = None) -> str:
         """Unbookmark a post on Substack remotely; returns a confirmation status.
 

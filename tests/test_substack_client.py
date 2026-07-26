@@ -245,6 +245,26 @@ def test_unsave_post_impl_confirmed_via_direct_api_when_post_id_known(tmp_path: 
     assert status == "confirmed"
 
 
+def test_fetch_post_content_impl_returns_body_html_from_preloads(tmp_path: Path):
+    client = _client(tmp_path)
+    preloads = {"post": {"body_html": "<p>Full content.</p>", "title": "Some Post", "audience": "everyone"}}
+    pw = MockPlaywrightForImpl(MockPageForImpl(MockButton(present=False), preloads=preloads))
+
+    result = client._fetch_post_content_impl(url="https://pub.substack.com/p/some-post", playwright_instance=pw)
+    assert result["body_html"] == "<p>Full content.</p>"
+    assert result["title"] == "Some Post"
+    assert result["audience"] == "everyone"
+
+
+def test_fetch_post_content_impl_returns_none_when_preloads_lacks_body(tmp_path: Path):
+    client = _client(tmp_path)
+    preloads = {"post": {"title": "Some Post"}}
+    pw = MockPlaywrightForImpl(MockPageForImpl(MockButton(present=False), preloads=preloads))
+
+    result = client._fetch_post_content_impl(url="https://pub.substack.com/p/some-post", playwright_instance=pw)
+    assert result["body_html"] is None
+
+
 def test_unsave_post_impl_falls_back_to_dom_when_api_delete_fails(tmp_path: Path):
     """If the direct DELETE call doesn't confirm, fall back to the DOM click."""
     client = _client(tmp_path)

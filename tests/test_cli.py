@@ -1,10 +1,12 @@
 """Integration tests for CLI subcommands using Click CliRunner."""
 
+from unittest.mock import patch
+
 from click.testing import CliRunner
 import pytest
 
 from substack_saved_mcp.cli import cli
-from substack_saved_mcp.database import init_db, upsert_post
+from substack_saved_mcp.database import get_post, init_db, upsert_post
 from substack_saved_mcp.models import SavedPost
 
 
@@ -78,3 +80,35 @@ def test_cli_audience_filter_and_command(setup_cli_db):
     assert res_audiences.exit_code == 0
     assert "everyone" in res_audiences.output
     assert "only_paid" in res_audiences.output
+
+
+def test_cli_get_content_fetches_and_caches(setup_cli_db):
+    upsert_post(SavedPost(
+        url="https://cli.substack.com/p/content-post",
+        title="Content Post",
+        publication_name="CLI Times",
+        is_saved=1,
+    ), setup_cli_db)
+
+    runner = CliRunner()
+
+    with patch("substack_saved_mcp.cli.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.fetch_post_content.return_value = {
+            "body_html": "<p>Full text here.</p>",
+            "title": "Content Post",
+            "audience": "everyone",
+        }
+        res = runner.invoke(cli, ["get-content", "https://cli.substack.com/p/content-post"])
+        assert res.exit_code == 0
+        assert "Full text here." in res.output
+        assert "Title: Content Post" in res.output
+
+    cached = get_post("https://cli.substack.com/p/content-post", setup_cli_db)
+    assert cached.content_text == "Full text here."
+
+
+def test_cli_get_content_not_found(setup_cli_db):
+    runner = CliRunner()
+    res = runner.invoke(cli, ["get-content", "https://cli.substack.com/p/missing"])
+    assert res.exit_code == 0
+    assert "not found" in res.output

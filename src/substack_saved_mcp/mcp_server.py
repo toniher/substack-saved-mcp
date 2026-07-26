@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 from fastmcp import FastMCP
 
+from substack_saved_mcp.content_utils import format_post_for_llm, html_to_llm_text
 from substack_saved_mcp.database import (
     get_post,
     get_status,
@@ -153,6 +154,79 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
         "message": message,
         "post": updated_post,
         "remote_confirmed": confirmation == "confirmed",
+    }
+
+
+@mcp.tool()
+def get_post_content(url_or_id: str, force_refetch: bool = False) -> Dict[str, Any]:
+    """Fetch a saved post's full content, cleaned and formatted for LLM consumption.
+
+    Returns the cached content_text if a previous fetch already stored it, unless
+    force_refetch is set. Otherwise fetches the post's page directly, extracts its
+    body_html from Substack's server-rendered window._preloads blob, converts it
+    to plain text (headings, list items, and links kept readable), and caches the
+    result. Requires an active authenticated Substack session. If the content
+    can't be located on the page (e.g. Substack changed how it embeds it, or the
+    post is paywalled beyond this account's access), returns success=False with a
+    message suggesting the caller run 'substack-saved-mcp inspect-network' while
+    opening the post so the real content source can be captured.
+    """
+    init_db()
+    post = get_post(url_or_id)
+    if not post:
+        return {"success": False, "message": f"Post '{url_or_id}' not found in local cache."}
+
+    if post.content_text and not force_refetch:
+        return {
+            "success": True,
+            "post": post,
+            "content": format_post_for_llm(
+                title=post.title,
+                publication_name=post.publication_name,
+                url=post.url,
+                body_text=post.content_text,
+                author_name=post.author_name,
+                published_at=post.published_at,
+            ),
+            "cached": True,
+        }
+
+    client = SubstackSavedPostsClient()
+    try:
+        result = client.fetch_post_content(post.url)
+    except AuthRequiredError as e:
+        return {"success": False, "message": str(e)}
+
+    body_html = result.get("body_html")
+    if not body_html:
+        return {
+            "success": False,
+            "post": post,
+            "message": (
+                "Could not find this post's full content on its page. Substack may "
+                "have changed how it embeds it, or this post is paywalled beyond "
+                f"this account's access. Run 'substack-saved-mcp inspect-network' "
+                f"while opening {post.url} in the browser so the real content "
+                "source can be captured, then this tool can be updated."
+            ),
+        }
+
+    body_text = html_to_llm_text(body_html)
+    post.content_text = body_text
+    updated_post = upsert_post(post)
+
+    return {
+        "success": True,
+        "post": updated_post,
+        "content": format_post_for_llm(
+            title=updated_post.title,
+            publication_name=updated_post.publication_name,
+            url=updated_post.url,
+            body_text=body_text,
+            author_name=updated_post.author_name,
+            published_at=updated_post.published_at,
+        ),
+        "cached": False,
     }
 
 

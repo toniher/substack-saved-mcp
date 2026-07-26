@@ -5,6 +5,7 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 ## Features
 
 - **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, publications, and content. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`).
+- **Full Content for LLMs**: Fetch a saved post's full content and get it back cleaned and formatted (headings, lists, links) for feeding directly to an LLM, with the result cached locally for next time.
 - **Save & Unsave**: Bookmark new Substack posts or unbookmark existing ones via authenticated browser sessions.
 - **Offline First**: Fast, offline queries directly from local SQLite cache.
 - **Privacy & Security**: Keeps session credentials local, redacting tokens from logs.
@@ -93,7 +94,10 @@ substack-saved-mcp search "artificial intelligence" --audience everyone
 substack-saved-mcp save "https://example.substack.com/p/post-slug"
 substack-saved-mcp unsave "https://example.substack.com/p/post-slug"
 
-# 6. Launch stdio MCP server
+# 6. Get a saved post's full content, cleaned up and ready for an LLM
+substack-saved-mcp get-content "https://example.substack.com/p/post-slug"
+
+# 7. Launch stdio MCP server
 substack-saved-mcp serve
 ```
 
@@ -161,7 +165,7 @@ export SUBSTACK_SAVED_DATA_DIR="/path/to/my/data_dir"
 
 - **Read & Search Tools** (`search_saved_posts`, `list_saved_posts`, `get_saved_post`, `list_publications`, `saved_posts_status`):  
   Operate 100% offline using the local SQLite database. Zero browser activity.
-- **Sync & Write Tools** (`sync_saved_posts`, `save_post`, `unsave_post`):  
+- **Sync & Write Tools** (`sync_saved_posts`, `save_post`, `unsave_post`, `get_post_content`):  
   Run in **headless background mode** using the pre-authenticated session stored in `storage_state.json`.
 - **Interactive Login**:  
   A visible browser window opens **only** when you manually run `substack-saved-mcp login` from your terminal. If your session expires while using an MCP client, the tool will return a clear error message instructing you to re-authenticate via `substack-saved-mcp login` instead of popping open a browser window unexpectedly.
