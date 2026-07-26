@@ -121,7 +121,14 @@ class SubstackSavedPostsClient:
                 if isinstance(data, list):
                     return data
                 elif isinstance(data, dict):
-                    return data.get("bookmarks") or data.get("posts") or data.get("items") or []
+                    return (
+                        data.get("bookmarks")
+                        or data.get("posts")
+                        or data.get("items")
+                        or data.get("saved_posts")
+                        or data.get("savedPosts")
+                        or []
+                    )
                 return []
             except Exception as e:
                 logger.warning(f"JSON parsing error from Substack response: {e}. Falling back to DOM extraction.")
@@ -142,34 +149,51 @@ class SubstackSavedPostsClient:
                 browser.close()
                 raise AuthRequiredError("Substack session has expired or is invalid. Please run 'substack-saved-mcp login'.")
 
-            # Extract post elements from DOM
-            cards = page.locator("a[href*='/p/']").all()
+            # Extract post elements from DOM with infinite scrolling
             seen_urls = set()
             results: List[Dict[str, Any]] = []
+            target_count = offset + limit
+            max_stale_scrolls = 4
+            stale_scrolls = 0
 
-            for card in cards:
-                try:
-                    href = card.get_attribute("href")
-                    title = card.inner_text().strip()
-                    if href and title and "/p/" in href:
-                        clean = canonicalize_url(href)
-                        if clean not in seen_urls:
-                            seen_urls.add(clean)
-                            # Extract publication name from hostname
-                            parsed = urlparse(clean)
-                            pub_name = parsed.netloc.split(".")[0].capitalize()
+            while len(results) < target_count and stale_scrolls < max_stale_scrolls:
+                prev_count = len(results)
+                cards = page.locator("a[href*='/p/']").all()
 
-                            results.append({
-                                "canonical_url": clean,
-                                "title": title.split("\n")[0],
-                                "publication_name": pub_name,
-                                "publication_url": f"{parsed.scheme}://{parsed.netloc}",
-                                "excerpt": title,
-                                "saved_at": None,
-                                "published_at": None,
-                            })
-                except Exception:
-                    continue
+                for card in cards:
+                    try:
+                        href = card.get_attribute("href")
+                        title = card.inner_text().strip()
+                        if href and title and "/p/" in href:
+                            clean = canonicalize_url(href)
+                            if clean not in seen_urls:
+                                seen_urls.add(clean)
+                                # Extract publication name from hostname
+                                parsed = urlparse(clean)
+                                pub_name = parsed.netloc.split(".")[0].capitalize()
+
+                                results.append({
+                                    "canonical_url": clean,
+                                    "title": title.split("\n")[0],
+                                    "publication_name": pub_name,
+                                    "publication_url": f"{parsed.scheme}://{parsed.netloc}",
+                                    "excerpt": title,
+                                    "saved_at": None,
+                                    "published_at": None,
+                                })
+                    except Exception:
+                        continue
+
+                if len(results) >= target_count:
+                    break
+
+                if len(results) == prev_count:
+                    stale_scrolls += 1
+                else:
+                    stale_scrolls = 0
+
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1000)
 
             browser.close()
             return results
