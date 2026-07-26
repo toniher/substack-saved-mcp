@@ -1,5 +1,6 @@
 """Playwright client for Substack authentication, saved post extractions, and write operations."""
 
+import concurrent.futures
 import json
 import logging
 from pathlib import Path
@@ -11,6 +12,21 @@ from substack_saved_mcp.models import SavedPost
 from substack_saved_mcp.url_utils import canonicalize_url
 
 logger = logging.getLogger(__name__)
+
+
+def _run_playwright_sync(func, *args, **kwargs):
+    """Execute a function using Playwright Sync API safely, dispatching to a worker thread if an asyncio loop is active."""
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args, **kwargs)
+            return future.result()
+    return func(*args, **kwargs)
 
 
 class SubstackClientError(Exception):
@@ -28,6 +44,10 @@ def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
 
     Saves storage state (cookies, local storage) to storage_state.json once complete.
     """
+    return _run_playwright_sync(_perform_interactive_login_impl, browser_dir=browser_dir)
+
+
+def _perform_interactive_login_impl(browser_dir: Optional[Path] = None) -> Path:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -56,10 +76,26 @@ def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
         input("--> Press ENTER here AFTER you have successfully completed sign-in in the browser window: ")
 
         # Verify navigation to saved page or authenticated state
-        page.goto("https://substack.com/saved", wait_until="domcontentloaded")
+        try:
+            if page.is_closed():
+                pages = [p for p in context.pages if not p.is_closed()]
+                if pages:
+                    page = pages[0]
+                else:
+                    page = context.new_page()
+            page.goto("https://substack.com/saved", wait_until="domcontentloaded", timeout=10000)
+        except Exception as err:
+            logger.warning(f"Notice during login verification: {err}")
 
-        context.storage_state(path=str(state_file))
-        browser.close()
+        try:
+            context.storage_state(path=str(state_file))
+        except Exception as err:
+            logger.warning(f"Notice saving storage state: {err}")
+            
+        try:
+            browser.close()
+        except Exception:
+            pass
 
     # Restrict permissions on session storage state file
     import os
@@ -78,6 +114,11 @@ class SubstackSavedPostsClient:
 
     def __init__(self, storage_state_path: Optional[Path] = None):
         self.state_path = storage_state_path or get_storage_state_path()
+        self._dom_cache: Optional[List[Dict[str, Any]]] = None
+
+    def reset_cache(self) -> None:
+        """Reset cached DOM posts extraction."""
+        self._dom_cache = None
 
     def _ensure_authenticated(self) -> None:
         """Check if storage state exists."""
@@ -89,6 +130,9 @@ class SubstackSavedPostsClient:
 
     def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """Fetch a page of saved posts from Substack using Playwright request context."""
+        return _run_playwright_sync(self._fetch_saved_posts_page_impl, limit=limit, offset=offset)
+
+    def _fetch_saved_posts_page_impl(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         self._ensure_authenticated()
 
         try:
@@ -100,19 +144,23 @@ class SubstackSavedPostsClient:
             api_context = p.request.new_context(storage_state=str(self.state_path))
 
             # Attempt fetching from Substack's saved posts / bookmarks API endpoints
-            # API endpoint: https://substack.com/api/v1/bookmarks or /api/v1/saved_posts
-            endpoint_url = f"https://substack.com/api/v1/bookmarks?limit={limit}&offset={offset}"
-            response = api_context.get(endpoint_url)
+            endpoints = [
+                f"https://substack.com/api/v1/bookmarks?limit={limit}&offset={offset}",
+                f"https://substack.com/api/v1/reader/bookmarks?limit={limit}&offset={offset}",
+                f"https://substack.com/api/v1/saved?limit={limit}&offset={offset}",
+                f"https://substack.com/api/v1/saved_posts?limit={limit}&offset={offset}",
+            ]
 
-            if response.status in (401, 403) or "sign-in" in response.url:
-                raise AuthRequiredError("Substack session has expired or is invalid. Please run 'substack-saved-mcp login'.")
+            response = None
+            for ep in endpoints:
+                res = api_context.get(ep)
+                if res.status in (401, 403) or "sign-in" in res.url:
+                    raise AuthRequiredError("Substack session has expired or is invalid. Please run 'substack-saved-mcp login'.")
+                if res.ok:
+                    response = res
+                    break
 
-            if not response.ok:
-                # Fallback endpoint if bookmarks is not matching
-                endpoint_url_alt = f"https://substack.com/api/v1/saved_posts?limit={limit}&offset={offset}"
-                response = api_context.get(endpoint_url_alt)
-
-            if not response.ok:
+            if not response or not response.ok:
                 # If API fails, fall back to headless DOM extraction on https://substack.com/saved
                 return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
 
@@ -136,6 +184,16 @@ class SubstackSavedPostsClient:
 
     def _fetch_via_dom(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
         """Fallback method: Render https://substack.com/saved in headless browser and extract post cards."""
+        if playwright_instance is not None:
+            return self._fetch_via_dom_impl(offset=offset, limit=limit, playwright_instance=playwright_instance)
+        return _run_playwright_sync(
+            self._fetch_via_dom_impl,
+            offset=offset,
+            limit=limit,
+            playwright_instance=playwright_instance,
+        )
+
+    def _fetch_via_dom_impl(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
         self._ensure_authenticated()
 
         def _do_fetch(p):
@@ -143,7 +201,7 @@ class SubstackSavedPostsClient:
             context = browser.new_context(storage_state=str(self.state_path))
             page = context.new_page()
 
-            page.goto("https://substack.com/saved", wait_until="networkidle")
+            page.goto("https://substack.com/saved", wait_until="domcontentloaded", timeout=15000)
 
             if "sign-in" in page.url or page.locator("text=Sign in").count() > 0:
                 browser.close()
@@ -152,8 +210,8 @@ class SubstackSavedPostsClient:
             # Extract post elements from DOM with infinite scrolling
             seen_urls = set()
             results: List[Dict[str, Any]] = []
-            target_count = offset + limit
-            max_stale_scrolls = 4
+            target_count = max(offset + limit, 1000)
+            max_stale_scrolls = 6
             stale_scrolls = 0
 
             while len(results) < target_count and stale_scrolls < max_stale_scrolls:
@@ -192,23 +250,36 @@ class SubstackSavedPostsClient:
                 else:
                     stale_scrolls = 0
 
+                # Scroll down and attempt clicking any load/more buttons
+                try:
+                    more_btn = page.locator("button:has-text('Load more'), button:has-text('Show more'), button:has-text('More')").first
+                    if more_btn.count() > 0 and more_btn.is_visible():
+                        more_btn.click(timeout=1000)
+                except Exception:
+                    pass
+
+                page.evaluate("window.scrollBy(0, -100)")
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(1500)
 
             browser.close()
             return results
 
-        if playwright_instance is not None:
-            results = _do_fetch(playwright_instance)
-        else:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                results = _do_fetch(p)
+        if self._dom_cache is None:
+            if playwright_instance is not None:
+                self._dom_cache = _do_fetch(playwright_instance)
+            else:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    self._dom_cache = _do_fetch(p)
 
-        return results[offset : offset + limit]
+        return self._dom_cache[offset : offset + limit]
 
     def save_post(self, url: str) -> SavedPost:
         """Bookmark a post on Substack remotely and return extracted metadata."""
+        return _run_playwright_sync(self._save_post_impl, url=url)
+
+    def _save_post_impl(self, url: str) -> SavedPost:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
         from playwright.sync_api import sync_playwright
@@ -256,6 +327,9 @@ class SubstackSavedPostsClient:
 
     def unsave_post(self, url: str) -> bool:
         """Unbookmark a post on Substack remotely."""
+        return _run_playwright_sync(self._unsave_post_impl, url=url)
+
+    def _unsave_post_impl(self, url: str) -> bool:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
         from playwright.sync_api import sync_playwright

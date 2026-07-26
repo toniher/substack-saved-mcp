@@ -134,7 +134,7 @@ def test_dom_scrolling_mock(tmp_path: Path):
             self.total_cards = total_cards
             self.scroll_count = 0
 
-        def goto(self, url, wait_until=None):
+        def goto(self, url, **kwargs):
             pass
 
         def locator(self, sel):

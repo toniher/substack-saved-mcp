@@ -85,6 +85,7 @@ def sync_saved_posts(
     sync_id = start_sync_run(sync_mode=sync_mode, db_path=db_path)
 
     active_client = client or SubstackSavedPostsClient()
+    active_client.reset_cache()
     total_fetched = 0
     total_upserted = 0
     consecutive_matches = 0
