@@ -160,3 +160,19 @@ export SUBSTACK_SAVED_DATA_DIR="/path/to/my/data_dir"
   Run in **headless background mode** using the pre-authenticated session stored in `storage_state.json`.
 - **Interactive Login**:  
   A visible browser window opens **only** when you manually run `substack-saved-mcp login` from your terminal. If your session expires while using an MCP client, the tool will return a clear error message instructing you to re-authenticate via `substack-saved-mcp login` instead of popping open a browser window unexpectedly.
+
+### What if I get a Playwright "Executable doesn't exist" error?
+
+If you encounter an error like `BrowserType.launch: Executable doesn't exist` when running commands (especially `login`), it means Playwright hasn't installed its required browsers in the isolated environment.
+
+To fix this, you need to run the `playwright install` command *inside* the environment where the tool is installed. 
+
+For a system-wide tool installation (via `uv tool install`), run:
+```bash
+~/.local/share/uv/tools/substack-saved-mcp/bin/playwright install
+```
+
+If you are using a local development environment (via `uv sync`), run:
+```bash
+uv run playwright install
+```

@@ -114,7 +114,7 @@ class SubstackSavedPostsClient:
 
             if not response.ok:
                 # If API fails, fall back to headless DOM extraction on https://substack.com/saved
-                return self._fetch_via_dom(offset=offset, limit=limit)
+                return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
 
             try:
                 data = response.json()
@@ -125,15 +125,13 @@ class SubstackSavedPostsClient:
                 return []
             except Exception as e:
                 logger.warning(f"JSON parsing error from Substack response: {e}. Falling back to DOM extraction.")
-                return self._fetch_via_dom(offset=offset, limit=limit)
+                return self._fetch_via_dom(offset=offset, limit=limit, playwright_instance=p)
 
-    def _fetch_via_dom(self, offset: int = 0, limit: int = 20) -> List[Dict[str, Any]]:
+    def _fetch_via_dom(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
         """Fallback method: Render https://substack.com/saved in headless browser and extract post cards."""
         self._ensure_authenticated()
-        from playwright.sync_api import sync_playwright
 
-        results: List[Dict[str, Any]] = []
-        with sync_playwright() as p:
+        def _do_fetch(p):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(storage_state=str(self.state_path))
             page = context.new_page()
@@ -147,6 +145,7 @@ class SubstackSavedPostsClient:
             # Extract post elements from DOM
             cards = page.locator("a[href*='/p/']").all()
             seen_urls = set()
+            results: List[Dict[str, Any]] = []
 
             for card in cards:
                 try:
@@ -173,6 +172,14 @@ class SubstackSavedPostsClient:
                     continue
 
             browser.close()
+            return results
+
+        if playwright_instance is not None:
+            results = _do_fetch(playwright_instance)
+        else:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                results = _do_fetch(p)
 
         return results[offset : offset + limit]
 
