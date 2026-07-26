@@ -399,9 +399,14 @@ class SubstackSavedPostsClient:
     def save_post(self, url: str) -> Tuple[SavedPost, str]:
         """Bookmark a post on Substack remotely and return (extracted metadata, confirmation status).
 
-        confirmation is "confirmed", "unconfirmed", "not_found", or "click_failed" —
-        best-effort, since there's no documented way to verify the bookmark was
-        actually created server-side beyond the button's own rendered state.
+        Extracts the post's numeric ID and rich metadata from ``window._preloads``
+        (server-rendered into every post page) and, when found, calls the real
+        endpoint captured via `inspect-network` (``POST
+        https://substack.com/api/v1/posts/saved`` with body ``{"post_id": ...}``)
+        directly. Falls back to the best-effort DOM click (see
+        ``_click_bookmark_toggle``) if the ID can't be extracted or that call
+        doesn't confirm; confirmation is "confirmed", "unconfirmed", "not_found",
+        or "click_failed".
         """
         return _run_playwright_sync(self._save_post_impl, url=url)
 
@@ -420,32 +425,53 @@ class SubstackSavedPostsClient:
                 browser.close()
                 raise AuthRequiredError("Session expired during save. Please run 'substack-saved-mcp login'.")
 
-            # Extract title & metadata from page
-            title = page.title().split("|")[0].strip() or "Substack Post"
+            preloads = None
+            try:
+                preloads = page.evaluate("() => window._preloads")
+            except Exception:
+                pass
+
+            post_obj = (preloads or {}).get("post") or {}
+            pub_obj = (preloads or {}).get("pub") or {}
+            post_id = post_obj.get("id")
+
             parsed = urlparse(clean_url)
-            pub_name = parsed.netloc.split(".")[0].capitalize()
+            title = post_obj.get("title") or page.title().split("|")[0].strip() or "Substack Post"
+            pub_name = pub_obj.get("name") or parsed.netloc.split(".")[0].capitalize()
+            excerpt = post_obj.get("description") or post_obj.get("subtitle")
+            published_at = post_obj.get("post_date")
+            audience = post_obj.get("audience")
 
             toggle_status = self._click_bookmark_toggle(page)
 
-            # Also issue API request as a second, independent confirmation channel.
+            # Direct API call, keyed by the real numeric post_id, as an independent
+            # (and generally more reliable) confirmation channel than the DOM click.
             api_confirmed = False
-            try:
-                api_context = p.request.new_context(storage_state=str(self.state_path))
-                api_response = api_context.post("https://substack.com/api/v1/bookmark", data={"url": clean_url})
-                api_confirmed = bool(getattr(api_response, "ok", False))
-            except Exception:
-                pass
+            if post_id is not None:
+                try:
+                    api_context = p.request.new_context(storage_state=str(self.state_path))
+                    api_response = api_context.post(
+                        "https://substack.com/api/v1/posts/saved", data={"post_id": post_id}
+                    )
+                    api_confirmed = bool(getattr(api_response, "ok", False))
+                except Exception:
+                    pass
 
             # Save updated storage state
             context.storage_state(path=str(self.state_path))
             browser.close()
 
-            confirmation = "confirmed" if (toggle_status == "confirmed" or api_confirmed) else toggle_status
+            confirmation = "confirmed" if (api_confirmed or toggle_status == "confirmed") else toggle_status
             saved_post = SavedPost(
+                substack_post_id=str(post_id) if post_id is not None else None,
                 url=clean_url,
                 title=title,
                 publication_name=pub_name,
                 publication_url=f"{parsed.scheme}://{parsed.netloc}",
+                excerpt=excerpt,
+                published_at=published_at,
+                audience=audience,
+                is_paywalled=1 if audience == "only_paid" else 0,
                 is_saved=1,
             )
             return saved_post, confirmation
@@ -456,18 +482,38 @@ class SubstackSavedPostsClient:
         with sync_playwright() as p:
             return _do_save(p)
 
-    def unsave_post(self, url: str) -> str:
+    def unsave_post(self, url: str, post_id: Optional[int] = None) -> str:
         """Unbookmark a post on Substack remotely; returns a confirmation status.
 
-        See ``_click_bookmark_toggle`` for the meaning of the returned status.
+        When ``post_id`` (Substack's numeric post ID, i.e. ``SavedPost.substack_post_id``)
+        is known — normally the case for any post that has been through a `sync` —
+        this calls the real endpoint captured via `inspect-network`
+        (``DELETE https://substack.com/api/v1/posts/saved`` with body
+        ``{"post_id": ...}``) directly, without touching the DOM, and returns
+        "confirmed" on an ok response. If that's unavailable or fails, or
+        ``post_id`` is unknown, this falls back to the previous best-effort DOM
+        click — see ``_click_bookmark_toggle`` for the meaning of its statuses.
         """
-        return _run_playwright_sync(self._unsave_post_impl, url=url)
+        return _run_playwright_sync(self._unsave_post_impl, url=url, post_id=post_id)
 
-    def _unsave_post_impl(self, url: str, playwright_instance: Any = None) -> str:
+    def _unsave_post_impl(self, url: str, post_id: Optional[int] = None, playwright_instance: Any = None) -> str:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
 
         def _do_unsave(p):
+            if post_id is not None:
+                try:
+                    api_context = p.request.new_context(storage_state=str(self.state_path))
+                    response = api_context.delete(
+                        "https://substack.com/api/v1/posts/saved",
+                        data={"post_id": post_id},
+                    )
+                    if getattr(response, "ok", False):
+                        return "confirmed"
+                except Exception:
+                    pass
+                # Falls through to the DOM click below if the direct API call didn't confirm.
+
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(storage_state=str(self.state_path))
             page = context.new_page()

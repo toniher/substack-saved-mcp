@@ -120,7 +120,8 @@ def unsave(url_or_id: str) -> None:
     client = SubstackSavedPostsClient()
     confirmation = "click_failed"
     try:
-        confirmation = client.unsave_post(post.url)
+        post_id = int(post.substack_post_id) if post.substack_post_id else None
+        confirmation = client.unsave_post(post.url, post_id=post_id)
     except Exception as e:
         click.echo(f"Remote unsave notice: {e}")
 
@@ -240,6 +241,9 @@ def inspect_network() -> None:
         def handle_response(response):
             if "api/v1" in response.url or "bookmark" in response.url or "saved" in response.url:
                 click.echo(f"[Network Intercept] {response.request.method} {response.url} (Status: {response.status})")
+                post_data = response.request.post_data
+                if post_data:
+                    click.echo(f"    Body: {post_data}")
 
         page.on("response", handle_response)
         page.goto("https://substack.com/saved")

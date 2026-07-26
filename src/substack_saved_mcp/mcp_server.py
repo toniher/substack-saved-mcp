@@ -123,7 +123,9 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
     """Unbookmark a Substack post remotely and soft-delete it in local cache.
 
     Soft-deletion preserves post history while removing it from active search/list outputs.
-    Remote confirmation is best-effort (see save_post). remote_confirmed=False
+    When the post's Substack ID is known (normally true after a sync), this calls
+    Substack's real unsave endpoint directly and is reliably confirmed; otherwise
+    it falls back to a best-effort DOM click (see save_post). remote_confirmed=False
     means the post was still soft-deleted locally, but the tool could not
     verify the unbookmark on Substack's side.
     """
@@ -135,7 +137,8 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
     client = SubstackSavedPostsClient()
     confirmation = "click_failed"
     try:
-        confirmation = client.unsave_post(post.url)
+        post_id = int(post.substack_post_id) if post.substack_post_id else None
+        confirmation = client.unsave_post(post.url, post_id=post_id)
     except AuthRequiredError as e:
         return {"success": False, "message": str(e)}
     except Exception:
