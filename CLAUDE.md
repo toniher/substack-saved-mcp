@@ -19,7 +19,7 @@ uv sync --extra dev
 | Run the CLI | `uv run substack-saved-mcp --help` |
 | Reinstall tool globally | `uv tool install . --no-cache --force` |
 
-`ruff` is configured in `pyproject.toml` (rules: `E4`, `E7`, `E9`, `F`, `I`, `UP`, `B`, `RUF`, line length 120, target py311). Lint with `uvx ruff check .` or `uv run ruff check .`.
+`ruff` is configured in `pyproject.toml` (rules: `E4`, `E7`, `E9`, `F`, `I`, `UP`, `B`, `RUF`, line length 88, target py311). Lint with `uvx ruff check .` or `uv run ruff check .`.
 
 ## Architecture
 
