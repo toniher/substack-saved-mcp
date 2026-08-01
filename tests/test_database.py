@@ -122,7 +122,9 @@ def test_soft_delete_post(temp_db: Path):
 
 def test_reconcile_unsaved_posts(temp_db: Path):
     kept = upsert_post(SavedPost(url="https://pub1.com/p/kept", title="Kept", publication_name="Pub One"), temp_db)
-    removed = upsert_post(SavedPost(url="https://pub1.com/p/removed", title="Removed", publication_name="Pub One"), temp_db)
+    removed = upsert_post(
+        SavedPost(url="https://pub1.com/p/removed", title="Removed", publication_name="Pub One"), temp_db
+    )
 
     count = reconcile_unsaved_posts(["https://pub1.com/p/kept"], db_path=temp_db)
     assert count == 1
@@ -148,14 +150,28 @@ def test_reconcile_unsaved_posts_skips_empty_remote_list(temp_db: Path):
 
 
 def test_audience_stored_and_filterable(temp_db: Path):
-    upsert_post(SavedPost(
-        url="https://pub1.com/p/free", title="Free Post", publication_name="Pub One",
-        excerpt="content", audience="everyone", is_saved=1,
-    ), temp_db)
-    upsert_post(SavedPost(
-        url="https://pub1.com/p/paid", title="Paid Post", publication_name="Pub One",
-        excerpt="content", audience="only_paid", is_saved=1,
-    ), temp_db)
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/free",
+            title="Free Post",
+            publication_name="Pub One",
+            excerpt="content",
+            audience="everyone",
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/paid",
+            title="Paid Post",
+            publication_name="Pub One",
+            excerpt="content",
+            audience="only_paid",
+            is_saved=1,
+        ),
+        temp_db,
+    )
 
     fetched = get_post("https://pub1.com/p/paid", temp_db)
     assert fetched.audience == "only_paid"
@@ -171,9 +187,15 @@ def test_audience_stored_and_filterable(temp_db: Path):
 
 
 def test_list_audiences(temp_db: Path):
-    upsert_post(SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One", audience="everyone"), temp_db)
-    upsert_post(SavedPost(url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One", audience="everyone"), temp_db)
-    upsert_post(SavedPost(url="https://pub1.com/p/3", title="Post 3", publication_name="Pub One", audience="only_paid"), temp_db)
+    upsert_post(
+        SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One", audience="everyone"), temp_db
+    )
+    upsert_post(
+        SavedPost(url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One", audience="everyone"), temp_db
+    )
+    upsert_post(
+        SavedPost(url="https://pub1.com/p/3", title="Post 3", publication_name="Pub One", audience="only_paid"), temp_db
+    )
 
     tiers = list_audiences(temp_db)
     assert len(tiers) == 2
@@ -217,8 +239,10 @@ def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
             updated_at TEXT NOT NULL
         )
     """)
-    conn.execute("INSERT INTO posts (url, title, publication_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                 ("https://old.substack.com/p/pre-existing", "Pre-existing Post", "Old Pub", "2026-01-01", "2026-01-01"))
+    conn.execute(
+        "INSERT INTO posts (url, title, publication_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ("https://old.substack.com/p/pre-existing", "Pre-existing Post", "Old Pub", "2026-01-01", "2026-01-01"),
+    )
     conn.commit()
     conn.close()
 
@@ -230,11 +254,17 @@ def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
 
 
 def test_image_url_surfaced_in_list_and_search(temp_db: Path):
-    upsert_post(SavedPost(
-        url="https://pub1.com/p/with-image", title="Post With Image", publication_name="Pub One",
-        excerpt="some searchable text", image_url="https://substackcdn.com/image/fetch/example.jpeg",
-        is_saved=1,
-    ), temp_db)
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/with-image",
+            title="Post With Image",
+            publication_name="Pub One",
+            excerpt="some searchable text",
+            image_url="https://substackcdn.com/image/fetch/example.jpeg",
+            is_saved=1,
+        ),
+        temp_db,
+    )
 
     listed = list_posts(db_path=temp_db)
     assert listed[0].image_url == "https://substackcdn.com/image/fetch/example.jpeg"

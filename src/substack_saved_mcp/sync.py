@@ -67,7 +67,11 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
 
     title = post_obj.get("title") or "Untitled Substack Post"
     pub_name = pub_obj.get("name") or "Substack"
-    pub_url = pub_obj.get("custom_domain") or f"https://{pub_obj.get('subdomain')}.substack.com" if pub_obj.get("subdomain") else None
+    pub_url = (
+        pub_obj.get("custom_domain") or f"https://{pub_obj.get('subdomain')}.substack.com"
+        if pub_obj.get("subdomain")
+        else None
+    )
     author = post_obj.get("author") or post_obj.get("author_name") or (pub_obj.get("author_name") if pub_obj else None)
 
     # Dates. Leave saved_at unknown (None) rather than stamping the sync moment.
@@ -155,7 +159,9 @@ def sync_saved_posts(
                     if existing and existing.is_saved == 1 and existing.saved_at == parsed_post.saved_at:
                         consecutive_matches += 1
                         if consecutive_matches >= MAX_CONSECUTIVE_MATCHES:
-                            logger.info(f"Incremental sync: encountered {consecutive_matches} existing matches. Stopping early.")
+                            logger.info(
+                                f"Incremental sync: encountered {consecutive_matches} existing matches. Stopping early."
+                            )
                             break
                     else:
                         consecutive_matches = 0
@@ -176,8 +182,7 @@ def sync_saved_posts(
             reconciled_count = reconcile_unsaved_posts(remote_urls, db_path=db_path)
             if reconciled_count:
                 logger.info(
-                    f"Reconciliation: soft-deleted {reconciled_count} post(s) no longer "
-                    "in the remote saved list."
+                    f"Reconciliation: soft-deleted {reconciled_count} post(s) no longer in the remote saved list."
                 )
 
         finish_sync_run(

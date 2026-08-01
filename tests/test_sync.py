@@ -27,26 +27,28 @@ class MockSubstackClient(SubstackSavedPostsClient):
 
 def test_sync_saved_posts_success(tmp_path: Path):
     db_path = tmp_path / "sync_test.sqlite"
-    mock_payloads = [[
-        {
-            "created_at": "2026-06-01T10:00:00Z",
-            "post": {
-                "id": 101,
-                "title": "Post 1",
-                "canonical_url": "https://pub1.substack.com/p/post-1",
-                "publication": {"name": "Pub 1"},
+    mock_payloads = [
+        [
+            {
+                "created_at": "2026-06-01T10:00:00Z",
+                "post": {
+                    "id": 101,
+                    "title": "Post 1",
+                    "canonical_url": "https://pub1.substack.com/p/post-1",
+                    "publication": {"name": "Pub 1"},
+                },
             },
-        },
-        {
-            "created_at": "2026-06-02T10:00:00Z",
-            "post": {
-                "id": 102,
-                "title": "Post 2",
-                "canonical_url": "https://pub1.substack.com/p/post-2",
-                "publication": {"name": "Pub 1"},
+            {
+                "created_at": "2026-06-02T10:00:00Z",
+                "post": {
+                    "id": 102,
+                    "title": "Post 2",
+                    "canonical_url": "https://pub1.substack.com/p/post-2",
+                    "publication": {"name": "Pub 1"},
+                },
             },
-        },
-    ]]
+        ]
+    ]
 
     client = MockSubstackClient(pages=mock_payloads)
     run = sync_saved_posts(force=True, db_path=db_path, client=client)
@@ -124,17 +126,19 @@ def test_force_sync_reconciles_removed_posts(tmp_path: Path):
     )
     upsert_post(stale_post, db_path=db_path)
 
-    mock_payloads = [[
-        {
-            "created_at": "2026-06-01T10:00:00Z",
-            "post": {
-                "id": 101,
-                "title": "Post 1",
-                "canonical_url": "https://pub1.substack.com/p/post-1",
-                "publication": {"name": "Pub 1"},
+    mock_payloads = [
+        [
+            {
+                "created_at": "2026-06-01T10:00:00Z",
+                "post": {
+                    "id": 101,
+                    "title": "Post 1",
+                    "canonical_url": "https://pub1.substack.com/p/post-1",
+                    "publication": {"name": "Pub 1"},
+                },
             },
-        },
-    ]]
+        ]
+    ]
     client = MockSubstackClient(pages=mock_payloads)
     run = sync_saved_posts(force=True, db_path=db_path, client=client)
 
@@ -167,17 +171,19 @@ def test_incremental_sync_does_not_reconcile(tmp_path: Path):
     )
     upsert_post(other_post, db_path=db_path)
 
-    mock_payloads = [[
-        {
-            "created_at": "2026-06-01T10:00:00Z",
-            "post": {
-                "id": 101,
-                "title": "Post 1",
-                "canonical_url": "https://pub1.substack.com/p/post-1",
-                "publication": {"name": "Pub 1"},
+    mock_payloads = [
+        [
+            {
+                "created_at": "2026-06-01T10:00:00Z",
+                "post": {
+                    "id": 101,
+                    "title": "Post 1",
+                    "canonical_url": "https://pub1.substack.com/p/post-1",
+                    "publication": {"name": "Pub 1"},
+                },
             },
-        },
-    ]]
+        ]
+    ]
     client = MockSubstackClient(pages=mock_payloads)
     run = sync_saved_posts(force=False, db_path=db_path, client=client)
 
@@ -314,24 +320,39 @@ def test_reader_api_cursor_pagination(tmp_path: Path):
     pages = {
         "2999-01-01T00:00:00.000Z": {
             "posts": [
-                {"id": 1, "publication_id": 10, "title": "P1",
-                 "canonical_url": "https://a.substack.com/p/one",
-                 "post_date": "2026-06-10T00:00:00Z", "saved_at": "2026-06-20T00:00:00Z",
-                 "publishedBylines": [{"name": "Alice"}]},
-                {"id": 2, "publication_id": 11, "title": "P2",
-                 "canonical_url": "https://b.substack.com/p/two",
-                 "post_date": "2026-06-09T00:00:00Z", "saved_at": "2026-06-18T00:00:00Z",
-                 "publishedBylines": [{"name": "Bob"}]},
+                {
+                    "id": 1,
+                    "publication_id": 10,
+                    "title": "P1",
+                    "canonical_url": "https://a.substack.com/p/one",
+                    "post_date": "2026-06-10T00:00:00Z",
+                    "saved_at": "2026-06-20T00:00:00Z",
+                    "publishedBylines": [{"name": "Alice"}],
+                },
+                {
+                    "id": 2,
+                    "publication_id": 11,
+                    "title": "P2",
+                    "canonical_url": "https://b.substack.com/p/two",
+                    "post_date": "2026-06-09T00:00:00Z",
+                    "saved_at": "2026-06-18T00:00:00Z",
+                    "publishedBylines": [{"name": "Bob"}],
+                },
             ],
             "publications": [{"id": 10, "name": "Pub A"}, {"id": 11, "name": "Pub B"}],
             "more": True,
         },
         "2026-06-18T00:00:00Z": {
             "posts": [
-                {"id": 3, "publication_id": 12, "title": "P3",
-                 "canonical_url": "https://c.substack.com/p/three",
-                 "post_date": "2026-06-08T00:00:00Z", "saved_at": "2026-06-15T00:00:00Z",
-                 "publishedBylines": [{"name": "Carol"}]},
+                {
+                    "id": 3,
+                    "publication_id": 12,
+                    "title": "P3",
+                    "canonical_url": "https://c.substack.com/p/three",
+                    "post_date": "2026-06-08T00:00:00Z",
+                    "saved_at": "2026-06-15T00:00:00Z",
+                    "publishedBylines": [{"name": "Carol"}],
+                },
             ],
             "publications": [{"id": 12, "name": "Pub C"}],
             "more": False,
@@ -353,6 +374,7 @@ def test_reader_api_cursor_pagination(tmp_path: Path):
             after = None
             if "after=" in url:
                 from urllib.parse import unquote
+
                 after = unquote(url.split("after=")[1].split("&")[0])
             return MockResponse(pages[after])
 
@@ -391,11 +413,15 @@ def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
     """A 429 with a Retry-After header is retried (after honoring the header delay)
     rather than being silently treated as an empty/unavailable saved list."""
     ok_payload = {
-        "posts": [{
-            "id": 1, "publication_id": 10, "title": "P1",
-            "canonical_url": "https://a.substack.com/p/one",
-            "saved_at": "2026-06-20T00:00:00Z",
-        }],
+        "posts": [
+            {
+                "id": 1,
+                "publication_id": 10,
+                "title": "P1",
+                "canonical_url": "https://a.substack.com/p/one",
+                "saved_at": "2026-06-20T00:00:00Z",
+            }
+        ],
         "publications": [{"id": 10, "name": "Pub A"}],
         "more": False,
     }
@@ -415,9 +441,7 @@ def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
 
     slept: list[float] = []
     client = _reader_client(tmp_path)
-    posts = client._fetch_all_saved_via_reader_api(
-        MockApiContext(), page_size=2, sleep_func=slept.append
-    )
+    posts = client._fetch_all_saved_via_reader_api(MockApiContext(), page_size=2, sleep_func=slept.append)
 
     assert [p["id"] for p in posts] == [1]
     assert slept == [2.0]  # honored the Retry-After header value
@@ -426,6 +450,7 @@ def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
 def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
     """A 429 that never clears is treated as 'unavailable' (returns None so the
     caller can fall back), not as an empty success."""
+
     class MockApiContext:
         def __init__(self):
             self.calls = 0
@@ -439,9 +464,7 @@ def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
     ctx = MockApiContext()
     slept: list[float] = []
     client = _reader_client(tmp_path)
-    result = client._fetch_all_saved_via_reader_api(
-        ctx, page_size=2, max_retries=3, sleep_func=slept.append
-    )
+    result = client._fetch_all_saved_via_reader_api(ctx, page_size=2, max_retries=3, sleep_func=slept.append)
 
     assert result is None  # nothing fetched -> signal DOM fallback
     assert ctx.calls == 4  # 1 initial + 3 retries
@@ -454,7 +477,8 @@ def test_retry_after_seconds_caps_and_falls_back(tmp_path: Path):
     assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "5"}), 0) == 5.0
     assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "999"}), 0) == 30.0
     # Unparseable (e.g. HTTP-date) -> exponential backoff by attempt number.
-    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 2) == 2.0
+    assert (
+        client._retry_after_seconds(_RetryResponse(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 2) == 2.0
+    )
     # No header at all -> backoff.
     assert client._retry_after_seconds(_RetryResponse(), 1) == 1.0
-

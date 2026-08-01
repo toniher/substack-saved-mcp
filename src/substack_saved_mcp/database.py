@@ -40,6 +40,7 @@ def get_db_connection(db_path: Path | None = None) -> Generator[sqlite3.Connecti
 def init_db(db_path: Path | None = None) -> None:
     """Initialize SQLite database tables, indexes, FTS5 virtual table, and triggers."""
     from substack_saved_mcp.config import ensure_app_dirs
+
     ensure_app_dirs()
     with get_db_connection(db_path) as conn:
         # Add columns to a pre-existing posts table before the index below is
@@ -141,7 +142,9 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
         # Check if record already exists by substack_post_id or URL
         existing = None
         if post.substack_post_id:
-            cursor.execute("SELECT id, created_at, saved_at FROM posts WHERE substack_post_id = ?", (post.substack_post_id,))
+            cursor.execute(
+                "SELECT id, created_at, saved_at FROM posts WHERE substack_post_id = ?", (post.substack_post_id,)
+            )
             existing = cursor.fetchone()
         if not existing and clean_url:
             cursor.execute("SELECT id, created_at, saved_at FROM posts WHERE url = ?", (clean_url,))
@@ -153,7 +156,8 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
         # saved_at NULL rather than stamping now().
         saved_at = post.saved_at or (existing["saved_at"] if existing else None)
 
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO posts (
                 substack_post_id, url, title, publication_name, publication_url,
                 author_name, published_at, saved_at, unsaved_at, is_saved,
@@ -178,27 +182,29 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
                 reading_time_minutes = COALESCE(excluded.reading_time_minutes, posts.reading_time_minutes),
                 word_count = COALESCE(excluded.word_count, posts.word_count),
                 updated_at = excluded.updated_at
-        """, (
-            post.substack_post_id,
-            clean_url,
-            post.title,
-            post.publication_name,
-            post.publication_url,
-            post.author_name,
-            post.published_at,
-            saved_at,
-            post.unsaved_at,
-            post.is_saved,
-            post.excerpt,
-            post.content_text,
-            post.image_url,
-            post.audience,
-            post.is_paywalled,
-            post.reading_time_minutes,
-            post.word_count,
-            created_at,
-            now_iso,
-        ))
+        """,
+            (
+                post.substack_post_id,
+                clean_url,
+                post.title,
+                post.publication_name,
+                post.publication_url,
+                post.author_name,
+                post.published_at,
+                saved_at,
+                post.unsaved_at,
+                post.is_saved,
+                post.excerpt,
+                post.content_text,
+                post.image_url,
+                post.audience,
+                post.is_paywalled,
+                post.reading_time_minutes,
+                post.word_count,
+                created_at,
+                now_iso,
+            ),
+        )
 
         post_id = cursor.lastrowid if not existing else existing["id"]
         cursor.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
@@ -222,11 +228,14 @@ def soft_delete_post(url_or_id: str | int, db_path: Path | None = None) -> Saved
         if not row:
             return None
 
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE posts
             SET is_saved = 0, unsaved_at = ?, updated_at = ?
             WHERE id = ?
-        """, (now_iso, now_iso, row["id"]))
+        """,
+            (now_iso, now_iso, row["id"]),
+        )
 
         cursor.execute("SELECT * FROM posts WHERE id = ?", (row["id"],))
         return SavedPost(**dict(cursor.fetchone()))
@@ -356,7 +365,7 @@ def search_posts(
                p.reading_time_minutes, p.word_count
         FROM posts_fts fts
         JOIN posts p ON fts.rowid = p.id
-        WHERE {' AND '.join(where_clauses)}
+        WHERE {" AND ".join(where_clauses)}
         ORDER BY fts.rank
         LIMIT ?
     """
@@ -370,7 +379,10 @@ def search_posts(
         except sqlite3.OperationalError:
             # Fallback to standard LIKE if FTS query syntax is special/malformed
             like_query = f"%{query}%"
-            fallback_where = ["(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)", "is_saved = 1"]
+            fallback_where = [
+                "(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)",
+                "is_saved = 1",
+            ]
             fallback_params: list[str | int] = [like_query, like_query, like_query, like_query]
             if audience:
                 fallback_where.append("LOWER(audience) = LOWER(?)")
@@ -380,7 +392,7 @@ def search_posts(
                        published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
                        reading_time_minutes, word_count
                 FROM posts
-                WHERE {' AND '.join(fallback_where)}
+                WHERE {" AND ".join(fallback_where)}
                 ORDER BY saved_at DESC
                 LIMIT ?
             """
@@ -466,10 +478,13 @@ def start_sync_run(sync_mode: str = "incremental", db_path: Path | None = None) 
     now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO sync_runs (started_at, status, sync_mode)
             VALUES (?, 'running', ?)
-        """, (now_iso, sync_mode))
+        """,
+            (now_iso, sync_mode),
+        )
         return cursor.lastrowid  # type: ignore
 
 
@@ -486,9 +501,12 @@ def finish_sync_run(
     now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE sync_runs
             SET completed_at = ?, status = ?, fetched_count = ?, upserted_count = ?,
                 reconciled_count = ?, error_message = ?
             WHERE id = ?
-        """, (now_iso, status, fetched_count, upserted_count, reconciled_count, error_message, sync_id))
+        """,
+            (now_iso, status, fetched_count, upserted_count, reconciled_count, error_message, sync_id),
+        )

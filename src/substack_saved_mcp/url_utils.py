@@ -42,12 +42,14 @@ def canonicalize_url(url: str) -> str:
         path = path[:-1]
 
     # Reconstruct clean canonical URL (strip fragment/anchor as well)
-    clean_url = urlunparse((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        path,
-        parsed.params,
-        clean_query,
-        "",  # fragment stripped
-    ))
+    clean_url = urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            parsed.params,
+            clean_query,
+            "",  # fragment stripped
+        )
+    )
     return clean_url

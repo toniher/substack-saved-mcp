@@ -18,6 +18,7 @@ def _run_playwright_sync(func, *args, **kwargs):
     """Execute a function using Playwright Sync API safely, dispatching to a worker thread if an asyncio loop is active."""
     try:
         import asyncio
+
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
@@ -31,11 +32,13 @@ def _run_playwright_sync(func, *args, **kwargs):
 
 class SubstackClientError(Exception):
     """Base exception for Substack client operations."""
+
     pass
 
 
 class AuthRequiredError(SubstackClientError):
     """Raised when Substack session is expired, invalid, or unauthenticated."""
+
     pass
 
 
@@ -51,9 +54,12 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise SubstackClientError("Playwright is not installed. Please run 'pip install playwright && playwright install'") from None
+        raise SubstackClientError(
+            "Playwright is not installed. Please run 'pip install playwright && playwright install'"
+        ) from None
 
     from substack_saved_mcp.config import ensure_app_dirs
+
     ensure_app_dirs()
     target_dir = browser_dir or get_browser_dir()
     state_file = target_dir / "storage_state.json"
@@ -91,7 +97,7 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
             context.storage_state(path=str(state_file))
         except Exception as err:
             logger.warning(f"Notice saving storage state: {err}")
-            
+
         try:
             browser.close()
         except Exception:
@@ -99,6 +105,7 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
 
     # Restrict permissions on session storage state file
     import os
+
     if os.name == "posix" and state_file.exists():
         try:
             state_file.chmod(0o600)
@@ -178,11 +185,9 @@ class SubstackSavedPostsClient:
                 return min(float(int(str(raw).strip())), cap)
             except (ValueError, TypeError):
                 pass  # Not an integer (possibly an HTTP-date); use backoff instead.
-        return min(0.5 * (2 ** attempt), cap)
+        return min(0.5 * (2**attempt), cap)
 
-    def _reader_api_get(
-        self, api_context: Any, url: str, max_retries: int = 3, sleep_func=time.sleep
-    ) -> Any:
+    def _reader_api_get(self, api_context: Any, url: str, max_retries: int = 3, sleep_func=time.sleep) -> Any:
         """GET a reader-API URL, retrying on 429/5xx with Retry-After-aware backoff.
 
         Only transient statuses (429 Too Many Requests and 5xx server errors) are
@@ -203,8 +208,12 @@ class SubstackSavedPostsClient:
         return res
 
     def _fetch_all_saved_via_reader_api(
-        self, api_context: Any, page_size: int = 20, max_posts: int = 2000,
-        max_retries: int = 3, sleep_func=time.sleep,
+        self,
+        api_context: Any,
+        page_size: int = 20,
+        max_posts: int = 2000,
+        max_retries: int = 3,
+        sleep_func=time.sleep,
     ) -> list[dict[str, Any]] | None:
         """Fetch the full saved list from the reader inbox API via cursor pagination.
 
@@ -225,14 +234,9 @@ class SubstackSavedPostsClient:
         cursor: str = "2999-01-01T00:00:00.000Z"
 
         while len(all_posts) < max_posts:
-            url = (
-                f"https://substack.com/api/v1/reader/posts?inboxType=saved"
-                f"&limit={page_size}&after={quote(cursor)}"
-            )
+            url = f"https://substack.com/api/v1/reader/posts?inboxType=saved&limit={page_size}&after={quote(cursor)}"
 
-            res = self._reader_api_get(
-                api_context, url, max_retries=max_retries, sleep_func=sleep_func
-            )
+            res = self._reader_api_get(api_context, url, max_retries=max_retries, sleep_func=sleep_func)
             if res.status in (401, 403) or "sign-in" in res.url:
                 raise AuthRequiredError(
                     "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
@@ -294,7 +298,9 @@ class SubstackSavedPostsClient:
             playwright_instance=playwright_instance,
         )
 
-    def _fetch_via_dom_impl(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> list[dict[str, Any]]:
+    def _fetch_via_dom_impl(
+        self, offset: int = 0, limit: int = 20, playwright_instance: Any = None
+    ) -> list[dict[str, Any]]:
         self._ensure_authenticated()
 
         def _do_fetch(p):
@@ -306,7 +312,9 @@ class SubstackSavedPostsClient:
 
             if "sign-in" in page.url or page.locator("text=Sign in").count() > 0:
                 browser.close()
-                raise AuthRequiredError("Substack session has expired or is invalid. Please run 'substack-saved-mcp login'.")
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
 
             # Extract post elements from DOM with infinite scrolling
             seen_urls = set()
@@ -355,17 +363,19 @@ class SubstackSavedPostsClient:
 
                         fallback_pub = parsed.netloc.split(".")[0].capitalize()
 
-                        results.append({
-                            "_dom": True,
-                            "canonical_url": clean,
-                            "title": title or pub_name or fallback_pub,
-                            "publication_name": pub_name or fallback_pub,
-                            "publication_url": f"{parsed.scheme}://{parsed.netloc}",
-                            "author_name": author,
-                            "excerpt": excerpt,
-                            "saved_at": None,
-                            "published_at": published_display,
-                        })
+                        results.append(
+                            {
+                                "_dom": True,
+                                "canonical_url": clean,
+                                "title": title or pub_name or fallback_pub,
+                                "publication_name": pub_name or fallback_pub,
+                                "publication_url": f"{parsed.scheme}://{parsed.netloc}",
+                                "author_name": author,
+                                "excerpt": excerpt,
+                                "saved_at": None,
+                                "published_at": published_display,
+                            }
+                        )
                     except Exception:
                         continue
 
@@ -379,7 +389,9 @@ class SubstackSavedPostsClient:
 
                 # Scroll down and attempt clicking any load/more buttons
                 try:
-                    more_btn = page.locator("button:has-text('Load more'), button:has-text('Show more'), button:has-text('More')").first
+                    more_btn = page.locator(
+                        "button:has-text('Load more'), button:has-text('Show more'), button:has-text('More')"
+                    ).first
                     if more_btn.count() > 0 and more_btn.is_visible():
                         more_btn.click(timeout=1000)
                 except Exception:
@@ -397,6 +409,7 @@ class SubstackSavedPostsClient:
                 self._dom_cache = _do_fetch(playwright_instance)
             else:
                 from playwright.sync_api import sync_playwright
+
                 with sync_playwright() as p:
                     self._dom_cache = _do_fetch(p)
 
@@ -525,6 +538,7 @@ class SubstackSavedPostsClient:
         if playwright_instance is not None:
             return _do_save(playwright_instance)
         from playwright.sync_api import sync_playwright
+
         with sync_playwright() as p:
             return _do_save(p)
 
@@ -554,7 +568,9 @@ class SubstackSavedPostsClient:
 
             if "sign-in" in page.url:
                 browser.close()
-                raise AuthRequiredError("Session expired while fetching content. Please run 'substack-saved-mcp login'.")
+                raise AuthRequiredError(
+                    "Session expired while fetching content. Please run 'substack-saved-mcp login'."
+                )
 
             preloads = None
             try:
@@ -574,6 +590,7 @@ class SubstackSavedPostsClient:
         if playwright_instance is not None:
             return _do_fetch(playwright_instance)
         from playwright.sync_api import sync_playwright
+
         with sync_playwright() as p:
             return _do_fetch(p)
 
@@ -629,5 +646,6 @@ class SubstackSavedPostsClient:
         if playwright_instance is not None:
             return _do_unsave(playwright_instance)
         from playwright.sync_api import sync_playwright
+
         with sync_playwright() as p:
             return _do_unsave(p)

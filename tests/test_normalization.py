@@ -69,50 +69,60 @@ def test_parse_remote_post_reader_api_shape():
 @pytest.mark.parametrize("field", ["wordcount", "word_count", "words"])
 def test_parse_remote_post_maps_word_count_candidates(field):
     """Word count is picked up from any of the likely field-name variants."""
-    post = parse_remote_post({
-        "id": 1,
-        "canonical_url": "https://x.substack.com/p/a",
-        field: 850,
-    })
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            field: 850,
+        }
+    )
     assert post.word_count == 850
 
 
 def test_parse_remote_post_derives_reading_time_from_word_count():
     """Reading time is derived (ceil at ~200 wpm), not read from a field."""
     # 850 words -> ceil(850/200) = 5 minutes.
-    post = parse_remote_post({
-        "id": 1,
-        "canonical_url": "https://x.substack.com/p/a",
-        "wordcount": 850,
-    })
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "wordcount": 850,
+        }
+    )
     assert post.reading_time_minutes == 5
 
     # A very short post still rounds up to at least 1 minute.
-    short = parse_remote_post({
-        "id": 2,
-        "canonical_url": "https://x.substack.com/p/b",
-        "wordcount": 10,
-    })
+    short = parse_remote_post(
+        {
+            "id": 2,
+            "canonical_url": "https://x.substack.com/p/b",
+            "wordcount": 10,
+        }
+    )
     assert short.reading_time_minutes == 1
 
 
 @pytest.mark.parametrize("field", ["cover_image", "image_url"])
 def test_parse_remote_post_maps_image_url_candidates(field):
     """image_url is picked up from either likely field-name variant."""
-    post = parse_remote_post({
-        "id": 1,
-        "canonical_url": "https://x.substack.com/p/a",
-        field: "https://substackcdn.com/image/fetch/example.jpeg",
-    })
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            field: "https://substackcdn.com/image/fetch/example.jpeg",
+        }
+    )
     assert post.image_url == "https://substackcdn.com/image/fetch/example.jpeg"
 
 
 def test_parse_remote_post_word_count_absent_leaves_fields_none():
     """No word count field and no bogus values -> both stay None (not 0)."""
-    post = parse_remote_post({
-        "id": 1,
-        "canonical_url": "https://x.substack.com/p/a",
-        "wordcount": 0,  # non-positive is ignored
-    })
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "wordcount": 0,  # non-positive is ignored
+        }
+    )
     assert post.word_count is None
     assert post.reading_time_minutes is None

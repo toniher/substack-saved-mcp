@@ -3,9 +3,26 @@
 from html.parser import HTMLParser
 
 _BLOCK_TAGS = {
-    "p", "div", "section", "article", "blockquote", "pre",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "ul", "ol", "li", "tr", "table", "figure", "figcaption", "hr",
+    "p",
+    "div",
+    "section",
+    "article",
+    "blockquote",
+    "pre",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "li",
+    "tr",
+    "table",
+    "figure",
+    "figcaption",
+    "hr",
 }
 _SKIP_CONTENT_TAGS = {"script", "style", "noscript", "iframe"}
 _HEADING_PREFIX = {"h1": "# ", "h2": "## ", "h3": "### ", "h4": "#### ", "h5": "##### ", "h6": "###### "}

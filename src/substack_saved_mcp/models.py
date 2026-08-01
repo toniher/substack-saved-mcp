@@ -14,13 +14,13 @@ class SavedPost(BaseModel):
     publication_url: str | None = None
     author_name: str | None = None
     published_at: str | None = None  # ISO-8601 UTC timestamp of original post
-    saved_at: str | None = None      # ISO-8601 UTC timestamp when bookmarked
-    unsaved_at: str | None = None    # ISO-8601 UTC timestamp when unsaved
-    is_saved: int = 1                   # 1 = active, 0 = unsaved
+    saved_at: str | None = None  # ISO-8601 UTC timestamp when bookmarked
+    unsaved_at: str | None = None  # ISO-8601 UTC timestamp when unsaved
+    is_saved: int = 1  # 1 = active, 0 = unsaved
     excerpt: str | None = None
     content_text: str | None = None
     image_url: str | None = None
-    audience: str | None = None       # raw Substack audience tier, e.g. "everyone", "only_paid"
+    audience: str | None = None  # raw Substack audience tier, e.g. "everyone", "only_paid"
     is_paywalled: int = 0
     reading_time_minutes: int | None = None
     word_count: int | None = None

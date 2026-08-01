@@ -135,8 +135,7 @@ def unsave(url_or_id: str) -> None:
         click.secho(f"Successfully unsaved '{post.title}' from local cache.", fg="green")
         if confirmation != "confirmed":
             click.secho(
-                f"Warning: could not confirm the bookmark was removed on Substack's own page "
-                f"(status: {confirmation}).",
+                f"Warning: could not confirm the bookmark was removed on Substack's own page (status: {confirmation}).",
                 fg="yellow",
             )
 
@@ -144,7 +143,9 @@ def unsave(url_or_id: str) -> None:
 @cli.command()
 @click.argument("query")
 @click.option("--publication", help="Filter by publication name.")
-@click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
+@click.option(
+    "--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values."
+)
 @click.option("--published-after", help="Only posts published on/after this ISO-8601 date (e.g. 2026-01-01).")
 @click.option("--published-before", help="Only posts published on/before this ISO-8601 date.")
 @click.option("--saved-after", help="Only posts bookmarked on/after this ISO-8601 date.")
@@ -196,7 +197,9 @@ def search(
 @click.option("--limit", default=10, help="Number of posts to display.")
 @click.option("--offset", default=0, help="Pagination offset.")
 @click.option("--publication", help="Filter by publication name.")
-@click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
+@click.option(
+    "--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values."
+)
 @click.option("--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at")
 def list_cmd(limit: int, offset: int, publication: str | None, audience: str | None, sort_by: str) -> None:
     """List saved posts ordered by saved date or publication date."""
@@ -210,7 +213,9 @@ def list_cmd(limit: int, offset: int, publication: str | None, audience: str | N
     for idx, p in enumerate(posts, offset + 1):
         reading = f" | {p.reading_time_minutes} min ({p.word_count} words)" if p.reading_time_minutes else ""
         click.secho(f"{idx}. {p.title}", fg="cyan")
-        click.echo(f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}{reading}")
+        click.echo(
+            f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}{reading}"
+        )
         click.echo(f"   URL: {p.url}\n")
 
 
@@ -272,14 +277,16 @@ def get_content(url_or_id: str, no_cache: bool) -> None:
         return
 
     if post.content_text:
-        click.echo(format_post_for_llm(
-            title=post.title,
-            publication_name=post.publication_name,
-            url=post.url,
-            body_text=post.content_text,
-            author_name=post.author_name,
-            published_at=post.published_at,
-        ))
+        click.echo(
+            format_post_for_llm(
+                title=post.title,
+                publication_name=post.publication_name,
+                url=post.url,
+                body_text=post.content_text,
+                author_name=post.author_name,
+                published_at=post.published_at,
+            )
+        )
         return
 
     click.echo(f"Fetching full content for '{post.title}'...", err=True)
@@ -310,14 +317,16 @@ def get_content(url_or_id: str, no_cache: bool) -> None:
         post.content_text = body_text
         post = upsert_post(post)
 
-    click.echo(format_post_for_llm(
-        title=post.title,
-        publication_name=post.publication_name,
-        url=post.url,
-        body_text=body_text,
-        author_name=post.author_name,
-        published_at=post.published_at,
-    ))
+    click.echo(
+        format_post_for_llm(
+            title=post.title,
+            publication_name=post.publication_name,
+            url=post.url,
+            body_text=body_text,
+            author_name=post.author_name,
+            published_at=post.published_at,
+        )
+    )
 
 
 @cli.command()
