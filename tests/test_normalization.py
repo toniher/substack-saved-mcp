@@ -49,13 +49,19 @@ def test_parse_remote_post_reader_api_shape():
         "is_saved": True,
         "saved_at": "2026-06-10T13:46:19.832Z",
         # Fields the client attaches during enrichment:
-        "publication": {"name": "Wes Kao's Newsletter", "subdomain": "newsletter.weskao"},
+        "publication": {
+            "name": "Wes Kao's Newsletter",
+            "subdomain": "newsletter.weskao",
+        },
         "author_name": "Wes Kao",
     }
 
     post = parse_remote_post(raw_post)
     assert post.substack_post_id == "173764217"
-    assert post.url == "https://newsletter.weskao.com/p/fundamentals-how-to-share-your-point"
+    assert (
+        post.url
+        == "https://newsletter.weskao.com/p/fundamentals-how-to-share-your-point"
+    )
     assert post.title == "How to share your point of view"
     assert post.publication_name == "Wes Kao's Newsletter"
     assert post.author_name == "Wes Kao"

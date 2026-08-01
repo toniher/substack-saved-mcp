@@ -14,7 +14,10 @@ from substack_saved_mcp.database import (
     upsert_post,
 )
 from substack_saved_mcp.models import SavedPost, SyncRun
-from substack_saved_mcp.substack_client import AuthRequiredError, SubstackSavedPostsClient
+from substack_saved_mcp.substack_client import (
+    AuthRequiredError,
+    SubstackSavedPostsClient,
+)
 from substack_saved_mcp.url_utils import canonicalize_url
 
 logger = logging.getLogger(__name__)
@@ -68,17 +71,26 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
     title = post_obj.get("title") or "Untitled Substack Post"
     pub_name = pub_obj.get("name") or "Substack"
     pub_url = (
-        pub_obj.get("custom_domain") or f"https://{pub_obj.get('subdomain')}.substack.com"
+        pub_obj.get("custom_domain")
+        or f"https://{pub_obj.get('subdomain')}.substack.com"
         if pub_obj.get("subdomain")
         else None
     )
-    author = post_obj.get("author") or post_obj.get("author_name") or (pub_obj.get("author_name") if pub_obj else None)
+    author = (
+        post_obj.get("author")
+        or post_obj.get("author_name")
+        or (pub_obj.get("author_name") if pub_obj else None)
+    )
 
     # Dates. Leave saved_at unknown (None) rather than stamping the sync moment.
     published_at = post_obj.get("post_date") or post_obj.get("published_at")
     saved_at = raw_data.get("created_at") or raw_data.get("saved_at")
 
-    excerpt = post_obj.get("description") or post_obj.get("subtitle") or post_obj.get("excerpt")
+    excerpt = (
+        post_obj.get("description")
+        or post_obj.get("subtitle")
+        or post_obj.get("excerpt")
+    )
     content_text = post_obj.get("body_html") or post_obj.get("content_text")
     image_url = post_obj.get("cover_image") or post_obj.get("image_url")
     audience = post_obj.get("audience")
@@ -92,7 +104,9 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
     # presents it.
     word_count = _first_positive_int(post_obj, "wordcount", "word_count", "words")
     reading_time_minutes = (
-        -(-word_count // WORDS_PER_MINUTE) if word_count else None  # ceil division, min 1
+        -(-word_count // WORDS_PER_MINUTE)
+        if word_count
+        else None  # ceil division, min 1
     )
 
     return SavedPost(
@@ -141,7 +155,9 @@ def sync_saved_posts(
 
     try:
         while True:
-            remote_items = active_client.fetch_saved_posts_page(limit=page_size, offset=offset)
+            remote_items = active_client.fetch_saved_posts_page(
+                limit=page_size, offset=offset
+            )
             if not remote_items:
                 break
 
@@ -156,7 +172,11 @@ def sync_saved_posts(
                 # Incremental sync check
                 if not force:
                     existing = get_post(parsed_post.url, db_path=db_path)
-                    if existing and existing.is_saved == 1 and existing.saved_at == parsed_post.saved_at:
+                    if (
+                        existing
+                        and existing.is_saved == 1
+                        and existing.saved_at == parsed_post.saved_at
+                    ):
                         consecutive_matches += 1
                         if consecutive_matches >= MAX_CONSECUTIVE_MATCHES:
                             logger.info(

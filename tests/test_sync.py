@@ -3,20 +3,33 @@
 from pathlib import Path
 from typing import Any
 
-from substack_saved_mcp.database import get_post, get_status, init_db, list_posts, upsert_post
+from substack_saved_mcp.database import (
+    get_post,
+    get_status,
+    init_db,
+    list_posts,
+    upsert_post,
+)
 from substack_saved_mcp.models import SavedPost
-from substack_saved_mcp.substack_client import AuthRequiredError, SubstackSavedPostsClient
+from substack_saved_mcp.substack_client import (
+    AuthRequiredError,
+    SubstackSavedPostsClient,
+)
 from substack_saved_mcp.sync import sync_saved_posts
 
 
 class MockSubstackClient(SubstackSavedPostsClient):
     """Mock client returning static test fixture payloads."""
 
-    def __init__(self, pages: list[list[dict[str, Any]]], should_raise_auth: bool = False):
+    def __init__(
+        self, pages: list[list[dict[str, Any]]], should_raise_auth: bool = False
+    ):
         self.pages = pages
         self.should_raise_auth = should_raise_auth
 
-    def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    def fetch_saved_posts_page(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
         if self.should_raise_auth:
             raise AuthRequiredError("Session expired in mock.")
         page_idx = offset // limit
@@ -190,7 +203,9 @@ def test_incremental_sync_does_not_reconcile(tmp_path: Path):
     assert run.status == "success"
     assert run.reconciled_count == 0
 
-    other = get_post("https://pub1.substack.com/p/still-saved-elsewhere", db_path=db_path)
+    other = get_post(
+        "https://pub1.substack.com/p/still-saved-elsewhere", db_path=db_path
+    )
     assert other.is_saved == 1
 
 
@@ -299,7 +314,9 @@ def test_dom_scrolling_mock(tmp_path: Path):
             def launch(headless):
                 return MockBrowser()
 
-    results = client._fetch_via_dom(offset=0, limit=50, playwright_instance=MockPlaywright())
+    results = client._fetch_via_dom(
+        offset=0, limit=50, playwright_instance=MockPlaywright()
+    )
     assert len(results) == 30
     assert results[0]["canonical_url"] == "https://pub.substack.com/p/post-0"
     assert results[29]["canonical_url"] == "https://pub.substack.com/p/post-29"
@@ -441,7 +458,9 @@ def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
 
     slept: list[float] = []
     client = _reader_client(tmp_path)
-    posts = client._fetch_all_saved_via_reader_api(MockApiContext(), page_size=2, sleep_func=slept.append)
+    posts = client._fetch_all_saved_via_reader_api(
+        MockApiContext(), page_size=2, sleep_func=slept.append
+    )
 
     assert [p["id"] for p in posts] == [1]
     assert slept == [2.0]  # honored the Retry-After header value
@@ -464,7 +483,9 @@ def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
     ctx = MockApiContext()
     slept: list[float] = []
     client = _reader_client(tmp_path)
-    result = client._fetch_all_saved_via_reader_api(ctx, page_size=2, max_retries=3, sleep_func=slept.append)
+    result = client._fetch_all_saved_via_reader_api(
+        ctx, page_size=2, max_retries=3, sleep_func=slept.append
+    )
 
     assert result is None  # nothing fetched -> signal DOM fallback
     assert ctx.calls == 4  # 1 initial + 3 retries
@@ -474,11 +495,20 @@ def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
 def test_retry_after_seconds_caps_and_falls_back(tmp_path: Path):
     client = _reader_client(tmp_path)
     # Honors an integer Retry-After, clamped to the cap.
-    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "5"}), 0) == 5.0
-    assert client._retry_after_seconds(_RetryResponse(headers={"retry-after": "999"}), 0) == 30.0
+    assert (
+        client._retry_after_seconds(_RetryResponse(headers={"retry-after": "5"}), 0)
+        == 5.0
+    )
+    assert (
+        client._retry_after_seconds(_RetryResponse(headers={"retry-after": "999"}), 0)
+        == 30.0
+    )
     # Unparseable (e.g. HTTP-date) -> exponential backoff by attempt number.
     assert (
-        client._retry_after_seconds(_RetryResponse(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 2) == 2.0
+        client._retry_after_seconds(
+            _RetryResponse(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 2
+        )
+        == 2.0
     )
     # No header at all -> backoff.
     assert client._retry_after_seconds(_RetryResponse(), 1) == 1.0

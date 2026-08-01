@@ -61,7 +61,9 @@ def login() -> None:
 
 
 @cli.command()
-@click.option("--force", is_flag=True, help="Force full resync instead of incremental stop.")
+@click.option(
+    "--force", is_flag=True, help="Force full resync instead of incremental stop."
+)
 def sync(force: bool) -> None:
     """Sync saved posts from Substack account into local SQLite cache."""
     click.echo("Starting Substack saved posts sync...")
@@ -95,7 +97,9 @@ def save(url: str) -> None:
     try:
         post, confirmation = client.save_post(url)
         saved_db_post = upsert_post(post)
-        click.secho(f"Successfully saved '{saved_db_post.title}' to local cache!", fg="green")
+        click.secho(
+            f"Successfully saved '{saved_db_post.title}' to local cache!", fg="green"
+        )
         click.echo(f"Published at: {saved_db_post.published_at or 'N/A'}")
         click.echo(f"Saved at: {saved_db_post.saved_at}")
         if confirmation != "confirmed":
@@ -132,7 +136,9 @@ def unsave(url_or_id: str) -> None:
 
     updated = soft_delete_post(post.url)
     if updated:
-        click.secho(f"Successfully unsaved '{post.title}' from local cache.", fg="green")
+        click.secho(
+            f"Successfully unsaved '{post.title}' from local cache.", fg="green"
+        )
         if confirmation != "confirmed":
             click.secho(
                 f"Warning: could not confirm the bookmark was removed on Substack's own page (status: {confirmation}).",
@@ -144,12 +150,22 @@ def unsave(url_or_id: str) -> None:
 @click.argument("query")
 @click.option("--publication", help="Filter by publication name.")
 @click.option(
-    "--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values."
+    "--audience",
+    help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.",
 )
-@click.option("--published-after", help="Only posts published on/after this ISO-8601 date (e.g. 2026-01-01).")
-@click.option("--published-before", help="Only posts published on/before this ISO-8601 date.")
-@click.option("--saved-after", help="Only posts bookmarked on/after this ISO-8601 date.")
-@click.option("--saved-before", help="Only posts bookmarked on/before this ISO-8601 date.")
+@click.option(
+    "--published-after",
+    help="Only posts published on/after this ISO-8601 date (e.g. 2026-01-01).",
+)
+@click.option(
+    "--published-before", help="Only posts published on/before this ISO-8601 date."
+)
+@click.option(
+    "--saved-after", help="Only posts bookmarked on/after this ISO-8601 date."
+)
+@click.option(
+    "--saved-before", help="Only posts bookmarked on/before this ISO-8601 date."
+)
 @click.option("--limit", default=10, help="Maximum search results.")
 def search(
     query: str,
@@ -181,10 +197,14 @@ def search(
     for idx, p in enumerate(results, 1):
         click.secho(f"{idx}. {p.title}", fg="cyan", bold=True)
         click.echo(f"   Publication : {p.publication_name}")
-        click.echo(f"   Published   : {p.published_at or 'N/A'} | Saved: {p.saved_at or 'N/A'}")
+        click.echo(
+            f"   Published   : {p.published_at or 'N/A'} | Saved: {p.saved_at or 'N/A'}"
+        )
         click.echo(f"   Audience    : {p.audience or 'N/A'}")
         if p.reading_time_minutes or p.word_count:
-            click.echo(f"   Reading time: {p.reading_time_minutes or '?'} min ({p.word_count or '?'} words)")
+            click.echo(
+                f"   Reading time: {p.reading_time_minutes or '?'} min ({p.word_count or '?'} words)"
+            )
         click.echo(f"   URL         : {p.url}")
         if p.excerpt:
             click.echo(f"   Excerpt     : {p.excerpt[:120]}...")
@@ -198,20 +218,35 @@ def search(
 @click.option("--offset", default=0, help="Pagination offset.")
 @click.option("--publication", help="Filter by publication name.")
 @click.option(
-    "--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values."
+    "--audience",
+    help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.",
 )
-@click.option("--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at")
-def list_cmd(limit: int, offset: int, publication: str | None, audience: str | None, sort_by: str) -> None:
+@click.option(
+    "--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at"
+)
+def list_cmd(
+    limit: int, offset: int, publication: str | None, audience: str | None, sort_by: str
+) -> None:
     """List saved posts ordered by saved date or publication date."""
     init_db()
-    posts = db_list_posts(limit=limit, offset=offset, publication=publication, audience=audience, sort_by=sort_by)
+    posts = db_list_posts(
+        limit=limit,
+        offset=offset,
+        publication=publication,
+        audience=audience,
+        sort_by=sort_by,
+    )
     if not posts:
         click.echo("No saved posts found.")
         return
 
     click.echo(f"Saved Posts ({len(posts)} displayed):\n")
     for idx, p in enumerate(posts, offset + 1):
-        reading = f" | {p.reading_time_minutes} min ({p.word_count} words)" if p.reading_time_minutes else ""
+        reading = (
+            f" | {p.reading_time_minutes} min ({p.word_count} words)"
+            if p.reading_time_minutes
+            else ""
+        )
         click.secho(f"{idx}. {p.title}", fg="cyan")
         click.echo(
             f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}{reading}"
@@ -230,7 +265,9 @@ def publications() -> None:
 
     click.echo(f"Cached Publications ({len(pubs)} total):\n")
     for p in pubs:
-        click.echo(f"- {p.publication_name} ({p.post_count} saved post{'s' if p.post_count != 1 else ''})")
+        click.echo(
+            f"- {p.publication_name} ({p.post_count} saved post{'s' if p.post_count != 1 else ''})"
+        )
 
 
 @cli.command()
@@ -244,7 +281,9 @@ def audiences() -> None:
 
     click.echo(f"Cached Audience Tiers ({len(tiers)} total):\n")
     for t in tiers:
-        click.echo(f"- {t.audience or 'unknown'} ({t.post_count} saved post{'s' if t.post_count != 1 else ''})")
+        click.echo(
+            f"- {t.audience or 'unknown'} ({t.post_count} saved post{'s' if t.post_count != 1 else ''})"
+        )
 
 
 @cli.command()
@@ -262,7 +301,11 @@ def status() -> None:
 
 @cli.command(name="get-content")
 @click.argument("url_or_id")
-@click.option("--no-cache", is_flag=True, help="Don't store the fetched content in the local cache.")
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Don't store the fetched content in the local cache.",
+)
 def get_content(url_or_id: str, no_cache: bool) -> None:
     """Fetch a saved post's full content and print it formatted for an LLM.
 
@@ -345,15 +388,23 @@ def inspect_network() -> None:
         page = context.new_page()
 
         def handle_response(response):
-            if "api/v1" in response.url or "bookmark" in response.url or "saved" in response.url:
-                click.echo(f"[Network Intercept] {response.request.method} {response.url} (Status: {response.status})")
+            if (
+                "api/v1" in response.url
+                or "bookmark" in response.url
+                or "saved" in response.url
+            ):
+                click.echo(
+                    f"[Network Intercept] {response.request.method} {response.url} (Status: {response.status})"
+                )
                 post_data = response.request.post_data
                 if post_data:
                     click.echo(f"    Body: {post_data}")
 
         page.on("response", handle_response)
         page.goto("https://substack.com/saved")
-        click.echo("Navigate around your saved posts page. Press ENTER in terminal when finished.")
+        click.echo(
+            "Navigate around your saved posts page. Press ENTER in terminal when finished."
+        )
         input("--> Press ENTER to finish network inspection: ")
         browser.close()
 

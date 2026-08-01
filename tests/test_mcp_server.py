@@ -101,7 +101,9 @@ def test_mcp_unsave_tool(setup_test_db: Path):
     )
     saved = upsert_post(p, setup_test_db)
 
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
         mock_client_cls.return_value.unsave_post.return_value = "confirmed"
         res = unsave_post(saved.url)
         assert res["success"] is True
@@ -124,7 +126,9 @@ def test_mcp_unsave_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
     )
     saved = upsert_post(p, setup_test_db)
 
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
         mock_client_cls.return_value.unsave_post.return_value = "not_found"
         res = unsave_post(saved.url)
         assert res["success"] is True
@@ -152,7 +156,9 @@ def test_mcp_get_post_content_fetches_and_caches(setup_test_db: Path):
     )
     saved = upsert_post(p, setup_test_db)
 
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
         mock_client_cls.return_value.fetch_post_content.return_value = {
             "body_html": "<p>Hello world.</p>",
             "title": "Full Content Post",
@@ -165,7 +171,9 @@ def test_mcp_get_post_content_fetches_and_caches(setup_test_db: Path):
         assert "Title: Full Content Post" in res["content"]
 
     # Second call should use the now-cached content_text without calling the client again.
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
         res2 = get_post_content(saved.url)
         assert res2["success"] is True
         assert res2["cached"] is True
@@ -182,15 +190,21 @@ def test_mcp_get_post_content_reports_missing_body(setup_test_db: Path):
     )
     saved = upsert_post(p, setup_test_db)
 
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
-        mock_client_cls.return_value.fetch_post_content.return_value = {"body_html": None}
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.fetch_post_content.return_value = {
+            "body_html": None
+        }
         res = get_post_content(saved.url)
         assert res["success"] is False
         assert "inspect-network" in res["message"]
 
 
 def test_mcp_save_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
-    with patch("substack_saved_mcp.mcp_server.SubstackSavedPostsClient") as mock_client_cls:
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
         mock_client_cls.return_value.save_post.return_value = (
             SavedPost(
                 url="https://test.substack.com/p/new-post",

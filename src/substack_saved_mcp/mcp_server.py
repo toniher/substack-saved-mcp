@@ -29,7 +29,10 @@ from substack_saved_mcp.models import (
     SavedPostsStatus,
     SyncRun,
 )
-from substack_saved_mcp.substack_client import AuthRequiredError, SubstackSavedPostsClient
+from substack_saved_mcp.substack_client import (
+    AuthRequiredError,
+    SubstackSavedPostsClient,
+)
 from substack_saved_mcp.sync import sync_saved_posts as run_sync
 
 # Initialize FastMCP Server
@@ -120,7 +123,9 @@ def save_post(url: str) -> dict[str, Any]:
         "remote_confirmed": confirmation == "confirmed",
     }
     if confirmation != "confirmed":
-        result["warning"] = f"Could not confirm the bookmark toggle on Substack's page (status: {confirmation})."
+        result["warning"] = (
+            f"Could not confirm the bookmark toggle on Substack's page (status: {confirmation})."
+        )
     return result
 
 
@@ -138,7 +143,10 @@ def unsave_post(url_or_id: str) -> dict[str, Any]:
     init_db()
     post = get_post(url_or_id)
     if not post:
-        return {"success": False, "message": f"Post '{url_or_id}' not found in local cache."}
+        return {
+            "success": False,
+            "message": f"Post '{url_or_id}' not found in local cache.",
+        }
 
     client = SubstackSavedPostsClient()
     confirmation = "click_failed"
@@ -148,7 +156,9 @@ def unsave_post(url_or_id: str) -> dict[str, Any]:
     except AuthRequiredError as e:
         return {"success": False, "message": str(e)}
     except Exception:
-        confirmation = "click_failed"  # Continue soft deletion locally even if remote unsave fails
+        confirmation = (
+            "click_failed"  # Continue soft deletion locally even if remote unsave fails
+        )
 
     updated_post = soft_delete_post(post.url)
     message = f"Successfully unsaved post '{post.title}' locally."
@@ -179,7 +189,10 @@ def get_post_content(url_or_id: str, force_refetch: bool = False) -> dict[str, A
     init_db()
     post = get_post(url_or_id)
     if not post:
-        return {"success": False, "message": f"Post '{url_or_id}' not found in local cache."}
+        return {
+            "success": False,
+            "message": f"Post '{url_or_id}' not found in local cache.",
+        }
 
     if post.content_text and not force_refetch:
         return {

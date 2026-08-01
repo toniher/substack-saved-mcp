@@ -25,7 +25,14 @@ _BLOCK_TAGS = {
     "hr",
 }
 _SKIP_CONTENT_TAGS = {"script", "style", "noscript", "iframe"}
-_HEADING_PREFIX = {"h1": "# ", "h2": "## ", "h3": "### ", "h4": "#### ", "h5": "##### ", "h6": "###### "}
+_HEADING_PREFIX = {
+    "h1": "# ",
+    "h2": "## ",
+    "h3": "### ",
+    "h4": "#### ",
+    "h5": "##### ",
+    "h6": "###### ",
+}
 
 
 class _PostBodyToTextParser(HTMLParser):

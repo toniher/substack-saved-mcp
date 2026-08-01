@@ -110,7 +110,9 @@ def test_cli_get_content_fetches_and_caches(setup_cli_db):
             "title": "Content Post",
             "audience": "everyone",
         }
-        res = runner.invoke(cli, ["get-content", "https://cli.substack.com/p/content-post"])
+        res = runner.invoke(
+            cli, ["get-content", "https://cli.substack.com/p/content-post"]
+        )
         assert res.exit_code == 0
         assert "Full text here." in res.output
         assert "Title: Content Post" in res.output

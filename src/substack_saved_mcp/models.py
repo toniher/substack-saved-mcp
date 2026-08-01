@@ -20,7 +20,9 @@ class SavedPost(BaseModel):
     excerpt: str | None = None
     content_text: str | None = None
     image_url: str | None = None
-    audience: str | None = None  # raw Substack audience tier, e.g. "everyone", "only_paid"
+    audience: str | None = (
+        None  # raw Substack audience tier, e.g. "everyone", "only_paid"
+    )
     is_paywalled: int = 0
     reading_time_minutes: int | None = None
     word_count: int | None = None
@@ -73,7 +75,9 @@ class SyncRun(BaseModel):
     sync_mode: str = "incremental"  # 'incremental' or 'full'
     fetched_count: int = 0
     upserted_count: int = 0
-    reconciled_count: int = 0  # posts soft-deleted because they left the remote saved list
+    reconciled_count: int = (
+        0  # posts soft-deleted because they left the remote saved list
+    )
     error_message: str | None = None
 
 

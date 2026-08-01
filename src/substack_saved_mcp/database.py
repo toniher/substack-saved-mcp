@@ -18,7 +18,9 @@ from substack_saved_mcp.url_utils import canonicalize_url
 
 
 @contextmanager
-def get_db_connection(db_path: Path | None = None) -> Generator[sqlite3.Connection, None, None]:
+def get_db_connection(
+    db_path: Path | None = None,
+) -> Generator[sqlite3.Connection, None, None]:
     """Context manager for SQLite database connection with WAL mode enabled."""
     target_path = db_path or get_db_path()
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +48,9 @@ def init_db(db_path: Path | None = None) -> None:
         # Add columns to a pre-existing posts table before the index below is
         # created, since CREATE INDEX IF NOT EXISTS still fails on a missing column.
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='posts'"
+        )
         if cursor.fetchone():
             cursor.execute("PRAGMA table_info(posts)")
             existing_cols = {row["name"] for row in cursor.fetchall()}
@@ -127,7 +131,9 @@ def init_db(db_path: Path | None = None) -> None:
         """)
         # Additive migration for databases created before reconciliation tracking existed.
         try:
-            conn.execute("ALTER TABLE sync_runs ADD COLUMN reconciled_count INTEGER DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE sync_runs ADD COLUMN reconciled_count INTEGER DEFAULT 0"
+            )
         except sqlite3.OperationalError:
             pass  # column already present
 
@@ -143,11 +149,14 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
         existing = None
         if post.substack_post_id:
             cursor.execute(
-                "SELECT id, created_at, saved_at FROM posts WHERE substack_post_id = ?", (post.substack_post_id,)
+                "SELECT id, created_at, saved_at FROM posts WHERE substack_post_id = ?",
+                (post.substack_post_id,),
             )
             existing = cursor.fetchone()
         if not existing and clean_url:
-            cursor.execute("SELECT id, created_at, saved_at FROM posts WHERE url = ?", (clean_url,))
+            cursor.execute(
+                "SELECT id, created_at, saved_at FROM posts WHERE url = ?", (clean_url,)
+            )
             existing = cursor.fetchone()
 
         created_at = existing["created_at"] if existing else now_iso
@@ -212,17 +221,24 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
         return SavedPost(**dict(row))
 
 
-def soft_delete_post(url_or_id: str | int, db_path: Path | None = None) -> SavedPost | None:
+def soft_delete_post(
+    url_or_id: str | int, db_path: Path | None = None
+) -> SavedPost | None:
     """Mark a post as unsaved (is_saved = 0, unsaved_at = now)."""
     now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
 
-        if isinstance(url_or_id, int) or (isinstance(url_or_id, str) and url_or_id.isdigit()):
+        if isinstance(url_or_id, int) or (
+            isinstance(url_or_id, str) and url_or_id.isdigit()
+        ):
             cursor.execute("SELECT * FROM posts WHERE id = ?", (int(url_or_id),))
         else:
             clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute("SELECT * FROM posts WHERE url = ? OR substack_post_id = ?", (clean_url, str(url_or_id)))
+            cursor.execute(
+                "SELECT * FROM posts WHERE url = ? OR substack_post_id = ?",
+                (clean_url, str(url_or_id)),
+            )
 
         row = cursor.fetchone()
         if not row:
@@ -257,7 +273,9 @@ def reconcile_unsaved_posts(remote_urls: list[str], db_path: Path | None = None)
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, url FROM posts WHERE is_saved = 1")
-        stale_ids = [row["id"] for row in cursor.fetchall() if row["url"] not in clean_urls]
+        stale_ids = [
+            row["id"] for row in cursor.fetchall() if row["url"] not in clean_urls
+        ]
         if not stale_ids:
             return 0
 
@@ -272,11 +290,16 @@ def get_post(url_or_id: str | int, db_path: Path | None = None) -> SavedPost | N
     """Retrieve full post record by local ID, Substack post ID, or URL."""
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        if isinstance(url_or_id, int) or (isinstance(url_or_id, str) and url_or_id.isdigit()):
+        if isinstance(url_or_id, int) or (
+            isinstance(url_or_id, str) and url_or_id.isdigit()
+        ):
             cursor.execute("SELECT * FROM posts WHERE id = ?", (int(url_or_id),))
         else:
             clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute("SELECT * FROM posts WHERE url = ? OR substack_post_id = ?", (clean_url, str(url_or_id)))
+            cursor.execute(
+                "SELECT * FROM posts WHERE url = ? OR substack_post_id = ?",
+                (clean_url, str(url_or_id)),
+            )
         row = cursor.fetchone()
         return SavedPost(**dict(row)) if row else None
 
@@ -383,7 +406,12 @@ def search_posts(
                 "(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)",
                 "is_saved = 1",
             ]
-            fallback_params: list[str | int] = [like_query, like_query, like_query, like_query]
+            fallback_params: list[str | int] = [
+                like_query,
+                like_query,
+                like_query,
+                like_query,
+            ]
             if audience:
                 fallback_where.append("LOWER(audience) = LOWER(?)")
                 fallback_params.append(audience)
@@ -448,7 +476,9 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
         cursor.execute("SELECT COUNT(*) FROM posts WHERE is_saved = 0")
         total_unsaved = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(DISTINCT publication_name) FROM posts WHERE is_saved = 1")
+        cursor.execute(
+            "SELECT COUNT(DISTINCT publication_name) FROM posts WHERE is_saved = 1"
+        )
         total_pubs = cursor.fetchone()[0]
 
         cursor.execute("""
@@ -508,5 +538,13 @@ def finish_sync_run(
                 reconciled_count = ?, error_message = ?
             WHERE id = ?
         """,
-            (now_iso, status, fetched_count, upserted_count, reconciled_count, error_message, sync_id),
+            (
+                now_iso,
+                status,
+                fetched_count,
+                upserted_count,
+                reconciled_count,
+                error_message,
+                sync_id,
+            ),
         )

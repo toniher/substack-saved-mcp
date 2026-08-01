@@ -121,9 +121,19 @@ def test_soft_delete_post(temp_db: Path):
 
 
 def test_reconcile_unsaved_posts(temp_db: Path):
-    kept = upsert_post(SavedPost(url="https://pub1.com/p/kept", title="Kept", publication_name="Pub One"), temp_db)
+    kept = upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/kept", title="Kept", publication_name="Pub One"
+        ),
+        temp_db,
+    )
     removed = upsert_post(
-        SavedPost(url="https://pub1.com/p/removed", title="Removed", publication_name="Pub One"), temp_db
+        SavedPost(
+            url="https://pub1.com/p/removed",
+            title="Removed",
+            publication_name="Pub One",
+        ),
+        temp_db,
     )
 
     count = reconcile_unsaved_posts(["https://pub1.com/p/kept"], db_path=temp_db)
@@ -140,7 +150,12 @@ def test_reconcile_unsaved_posts(temp_db: Path):
 def test_reconcile_unsaved_posts_skips_empty_remote_list(temp_db: Path):
     """An empty remote list is more likely a fetch glitch than mass-unsaving,
     so reconciliation must be a no-op rather than wiping every saved post."""
-    post = upsert_post(SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One"), temp_db)
+    post = upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One"
+        ),
+        temp_db,
+    )
 
     count = reconcile_unsaved_posts([], db_path=temp_db)
     assert count == 0
@@ -188,13 +203,31 @@ def test_audience_stored_and_filterable(temp_db: Path):
 
 def test_list_audiences(temp_db: Path):
     upsert_post(
-        SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One", audience="everyone"), temp_db
+        SavedPost(
+            url="https://pub1.com/p/1",
+            title="Post 1",
+            publication_name="Pub One",
+            audience="everyone",
+        ),
+        temp_db,
     )
     upsert_post(
-        SavedPost(url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One", audience="everyone"), temp_db
+        SavedPost(
+            url="https://pub1.com/p/2",
+            title="Post 2",
+            publication_name="Pub One",
+            audience="everyone",
+        ),
+        temp_db,
     )
     upsert_post(
-        SavedPost(url="https://pub1.com/p/3", title="Post 3", publication_name="Pub One", audience="only_paid"), temp_db
+        SavedPost(
+            url="https://pub1.com/p/3",
+            title="Post 3",
+            publication_name="Pub One",
+            audience="only_paid",
+        ),
+        temp_db,
     )
 
     tiers = list_audiences(temp_db)
@@ -241,7 +274,13 @@ def test_init_db_migrates_pre_audience_schema(tmp_path: Path):
     """)
     conn.execute(
         "INSERT INTO posts (url, title, publication_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        ("https://old.substack.com/p/pre-existing", "Pre-existing Post", "Old Pub", "2026-01-01", "2026-01-01"),
+        (
+            "https://old.substack.com/p/pre-existing",
+            "Pre-existing Post",
+            "Old Pub",
+            "2026-01-01",
+            "2026-01-01",
+        ),
     )
     conn.commit()
     conn.close()
@@ -274,9 +313,24 @@ def test_image_url_surfaced_in_list_and_search(temp_db: Path):
 
 
 def test_list_publications(temp_db: Path):
-    upsert_post(SavedPost(url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One"), temp_db)
-    upsert_post(SavedPost(url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One"), temp_db)
-    upsert_post(SavedPost(url="https://pub2.com/p/1", title="Post 3", publication_name="Pub Two"), temp_db)
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/1", title="Post 1", publication_name="Pub One"
+        ),
+        temp_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/2", title="Post 2", publication_name="Pub One"
+        ),
+        temp_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://pub2.com/p/1", title="Post 3", publication_name="Pub Two"
+        ),
+        temp_db,
+    )
 
     pubs = list_publications(temp_db)
     assert len(pubs) == 2
