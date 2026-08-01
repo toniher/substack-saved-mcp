@@ -1,11 +1,10 @@
 """SQLite database schema, FTS5 virtual table indexing, and query repository."""
 
-import json
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple, Union
 
 from substack_saved_mcp.config import get_db_path
 from substack_saved_mcp.models import (
@@ -14,13 +13,12 @@ from substack_saved_mcp.models import (
     PublicationSummary,
     SavedPost,
     SavedPostsStatus,
-    SyncRun,
 )
 from substack_saved_mcp.url_utils import canonicalize_url
 
 
 @contextmanager
-def get_db_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Connection, None, None]:
+def get_db_connection(db_path: Path | None = None) -> Generator[sqlite3.Connection, None, None]:
     """Context manager for SQLite database connection with WAL mode enabled."""
     target_path = db_path or get_db_path()
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +37,7 @@ def get_db_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Conne
         conn.close()
 
 
-def init_db(db_path: Optional[Path] = None) -> None:
+def init_db(db_path: Path | None = None) -> None:
     """Initialize SQLite database tables, indexes, FTS5 virtual table, and triggers."""
     from substack_saved_mcp.config import ensure_app_dirs
     ensure_app_dirs()
@@ -133,9 +131,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
             pass  # column already present
 
 
-def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
+def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
     """Insert or update a post in the database. Returns the updated SavedPost object."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     clean_url = canonicalize_url(post.url)
 
     with get_db_connection(db_path) as conn:
@@ -208,9 +206,9 @@ def upsert_post(post: SavedPost, db_path: Optional[Path] = None) -> SavedPost:
         return SavedPost(**dict(row))
 
 
-def soft_delete_post(url_or_id: Union[str, int], db_path: Optional[Path] = None) -> Optional[SavedPost]:
+def soft_delete_post(url_or_id: str | int, db_path: Path | None = None) -> SavedPost | None:
     """Mark a post as unsaved (is_saved = 0, unsaved_at = now)."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
 
@@ -234,7 +232,7 @@ def soft_delete_post(url_or_id: Union[str, int], db_path: Optional[Path] = None)
         return SavedPost(**dict(cursor.fetchone()))
 
 
-def reconcile_unsaved_posts(remote_urls: List[str], db_path: Optional[Path] = None) -> int:
+def reconcile_unsaved_posts(remote_urls: list[str], db_path: Path | None = None) -> int:
     """Soft-delete locally-active posts absent from a complete remote saved-URL set.
 
     Intended for use only after a full sync has enumerated every currently-saved
@@ -246,7 +244,7 @@ def reconcile_unsaved_posts(remote_urls: List[str], db_path: Optional[Path] = No
         return 0
     clean_urls = {canonicalize_url(u) for u in remote_urls if u}
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, url FROM posts WHERE is_saved = 1")
@@ -261,7 +259,7 @@ def reconcile_unsaved_posts(remote_urls: List[str], db_path: Optional[Path] = No
         return len(stale_ids)
 
 
-def get_post(url_or_id: Union[str, int], db_path: Optional[Path] = None) -> Optional[SavedPost]:
+def get_post(url_or_id: str | int, db_path: Path | None = None) -> SavedPost | None:
     """Retrieve full post record by local ID, Substack post ID, or URL."""
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
@@ -277,16 +275,16 @@ def get_post(url_or_id: Union[str, int], db_path: Optional[Path] = None) -> Opti
 def list_posts(
     limit: int = 20,
     offset: int = 0,
-    publication: Optional[str] = None,
-    audience: Optional[str] = None,
+    publication: str | None = None,
+    audience: str | None = None,
     sort_by: str = "saved_at",
     is_saved_only: bool = True,
-    db_path: Optional[Path] = None,
-) -> List[PostSummary]:
+    db_path: Path | None = None,
+) -> list[PostSummary]:
     """List posts with pagination, publication/audience filters, and sorting."""
     order_col = "published_at" if sort_by == "published_at" else "saved_at"
     where_clauses = []
-    params: List[Union[str, int]] = []
+    params: list[str | int] = []
 
     if is_saved_only:
         where_clauses.append("is_saved = 1")
@@ -317,19 +315,19 @@ def list_posts(
 
 def search_posts(
     query: str,
-    publication: Optional[str] = None,
-    audience: Optional[str] = None,
-    published_after: Optional[str] = None,
-    published_before: Optional[str] = None,
-    saved_after: Optional[str] = None,
-    saved_before: Optional[str] = None,
+    publication: str | None = None,
+    audience: str | None = None,
+    published_after: str | None = None,
+    published_before: str | None = None,
+    saved_after: str | None = None,
+    saved_before: str | None = None,
     limit: int = 20,
     is_saved_only: bool = True,
-    db_path: Optional[Path] = None,
-) -> List[PostSummary]:
+    db_path: Path | None = None,
+) -> list[PostSummary]:
     """Full-text search over posts using FTS5 BM25 relevance ranking and metadata filters."""
     where_clauses = ["posts_fts MATCH ?"]
-    params: List[Union[str, int]] = [query]
+    params: list[str | int] = [query]
 
     if is_saved_only:
         where_clauses.append("p.is_saved = 1")
@@ -373,7 +371,7 @@ def search_posts(
             # Fallback to standard LIKE if FTS query syntax is special/malformed
             like_query = f"%{query}%"
             fallback_where = ["(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)", "is_saved = 1"]
-            fallback_params: List[Union[str, int]] = [like_query, like_query, like_query, like_query]
+            fallback_params: list[str | int] = [like_query, like_query, like_query, like_query]
             if audience:
                 fallback_where.append("LOWER(audience) = LOWER(?)")
                 fallback_params.append(audience)
@@ -391,7 +389,7 @@ def search_posts(
             return [PostSummary(**dict(r)) for r in cursor.fetchall()]
 
 
-def list_publications(db_path: Optional[Path] = None) -> List[PublicationSummary]:
+def list_publications(db_path: Path | None = None) -> list[PublicationSummary]:
     """Return all unique publications in cache with active saved post count."""
     sql = """
         SELECT publication_name, MAX(publication_url) as publication_url, COUNT(*) as post_count
@@ -406,7 +404,7 @@ def list_publications(db_path: Optional[Path] = None) -> List[PublicationSummary
         return [PublicationSummary(**dict(r)) for r in cursor.fetchall()]
 
 
-def list_audiences(db_path: Optional[Path] = None) -> List[AudienceSummary]:
+def list_audiences(db_path: Path | None = None) -> list[AudienceSummary]:
     """Return distinct audience tiers present in cache with active saved post counts.
 
     Discovers the actual values in use (e.g. "everyone", "only_paid") rather than
@@ -426,7 +424,7 @@ def list_audiences(db_path: Optional[Path] = None) -> List[AudienceSummary]:
         return [AudienceSummary(**dict(r)) for r in cursor.fetchall()]
 
 
-def get_status(db_path: Optional[Path] = None) -> SavedPostsStatus:
+def get_status(db_path: Path | None = None) -> SavedPostsStatus:
     """Return metrics and statistics for local SQLite database."""
     target_path = db_path or get_db_path()
     with get_db_connection(target_path) as conn:
@@ -463,9 +461,9 @@ def get_status(db_path: Optional[Path] = None) -> SavedPostsStatus:
         )
 
 
-def start_sync_run(sync_mode: str = "incremental", db_path: Optional[Path] = None) -> int:
+def start_sync_run(sync_mode: str = "incremental", db_path: Path | None = None) -> int:
     """Create a sync_runs entry and return its ID."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -481,11 +479,11 @@ def finish_sync_run(
     fetched_count: int,
     upserted_count: int,
     reconciled_count: int = 0,
-    error_message: Optional[str] = None,
-    db_path: Optional[Path] = None,
+    error_message: str | None = None,
+    db_path: Path | None = None,
 ) -> None:
     """Update a sync_runs record upon completion or failure."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""

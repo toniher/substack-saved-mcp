@@ -1,7 +1,6 @@
 """Convert Substack post HTML content into clean text suitable for feeding to an LLM."""
 
 from html.parser import HTMLParser
-from typing import List, Optional, Tuple
 
 _BLOCK_TAGS = {
     "p", "div", "section", "article", "blockquote", "pre",
@@ -17,17 +16,17 @@ class _PostBodyToTextParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self._out: List[str] = []
+        self._out: list[str] = []
         self._skip_depth = 0
-        self._tag_stack: List[str] = []
-        self._link_href_stack: List[Optional[str]] = []
+        self._tag_stack: list[str] = []
+        self._link_href_stack: list[str | None] = []
         self._list_item_open = False
 
     def _write(self, text: str) -> None:
         if text:
             self._out.append(text)
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _SKIP_CONTENT_TAGS:
             self._skip_depth += 1
             return
@@ -83,7 +82,7 @@ class _PostBodyToTextParser(HTMLParser):
     def get_text(self) -> str:
         raw = "".join(self._out)
         lines = [line.strip() for line in raw.splitlines()]
-        collapsed: List[str] = []
+        collapsed: list[str] = []
         blank_run = 0
         for line in lines:
             if not line:
@@ -114,8 +113,8 @@ def format_post_for_llm(
     publication_name: str,
     url: str,
     body_text: str,
-    author_name: Optional[str] = None,
-    published_at: Optional[str] = None,
+    author_name: str | None = None,
+    published_at: str | None = None,
 ) -> str:
     """Assemble a post's metadata and cleaned body text into one LLM-ready document."""
     header_lines = [f"Title: {title}", f"Publication: {publication_name}"]

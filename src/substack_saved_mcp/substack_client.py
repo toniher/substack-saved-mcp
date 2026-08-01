@@ -1,11 +1,10 @@
 """Playwright client for Substack authentication, saved post extractions, and write operations."""
 
 import concurrent.futures
-import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 from substack_saved_mcp.config import get_browser_dir, get_storage_state_path
@@ -40,7 +39,7 @@ class AuthRequiredError(SubstackClientError):
     pass
 
 
-def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
+def perform_interactive_login(browser_dir: Path | None = None) -> Path:
     """Launch a visible browser window for the user to log in to Substack.
 
     Saves storage state (cookies, local storage) to storage_state.json once complete.
@@ -48,11 +47,11 @@ def perform_interactive_login(browser_dir: Optional[Path] = None) -> Path:
     return _run_playwright_sync(_perform_interactive_login_impl, browser_dir=browser_dir)
 
 
-def _perform_interactive_login_impl(browser_dir: Optional[Path] = None) -> Path:
+def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise SubstackClientError("Playwright is not installed. Please run 'pip install playwright && playwright install'")
+        raise SubstackClientError("Playwright is not installed. Please run 'pip install playwright && playwright install'") from None
 
     from substack_saved_mcp.config import ensure_app_dirs
     ensure_app_dirs()
@@ -113,10 +112,10 @@ def _perform_interactive_login_impl(browser_dir: Optional[Path] = None) -> Path:
 class SubstackSavedPostsClient:
     """Client for fetching and managing saved Substack posts via storage_state.json."""
 
-    def __init__(self, storage_state_path: Optional[Path] = None):
+    def __init__(self, storage_state_path: Path | None = None):
         self.state_path = storage_state_path or get_storage_state_path()
-        self._dom_cache: Optional[List[Dict[str, Any]]] = None
-        self._api_cache: Optional[List[Dict[str, Any]]] = None
+        self._dom_cache: list[dict[str, Any]] | None = None
+        self._api_cache: list[dict[str, Any]] | None = None
         self._api_failed: bool = False
 
     def reset_cache(self) -> None:
@@ -133,17 +132,17 @@ class SubstackSavedPostsClient:
                 "Please run 'substack-saved-mcp login' first to authenticate."
             )
 
-    def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Fetch a page of saved posts from Substack using Playwright request context."""
         return _run_playwright_sync(self._fetch_saved_posts_page_impl, limit=limit, offset=offset)
 
-    def _fetch_saved_posts_page_impl(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def _fetch_saved_posts_page_impl(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         self._ensure_authenticated()
 
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            raise SubstackClientError("Playwright is not installed.")
+            raise SubstackClientError("Playwright is not installed.") from None
 
         with sync_playwright() as p:
             # Prefer the reader inbox API: it returns the real bookmark timestamp
@@ -206,7 +205,7 @@ class SubstackSavedPostsClient:
     def _fetch_all_saved_via_reader_api(
         self, api_context: Any, page_size: int = 20, max_posts: int = 2000,
         max_retries: int = 3, sleep_func=time.sleep,
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> list[dict[str, Any]] | None:
         """Fetch the full saved list from the reader inbox API via cursor pagination.
 
         Returns a list of enriched post dicts (each carrying its real ``saved_at``,
@@ -219,7 +218,7 @@ class SubstackSavedPostsClient:
         """
         from urllib.parse import quote
 
-        all_posts: List[Dict[str, Any]] = []
+        all_posts: list[dict[str, Any]] = []
         seen_urls = set()
         # "after=X" returns posts saved before X (newest first); a far-future sentinel
         # yields the first (most recently saved) page. Substack always sends this param.
@@ -254,7 +253,7 @@ class SubstackSavedPostsClient:
 
             pubs_by_id = {pub.get("id"): pub for pub in (data.get("publications") or [])}
             before_len = len(all_posts)
-            page_min_saved: Optional[str] = None
+            page_min_saved: str | None = None
 
             for post in posts:
                 saved_at = post.get("saved_at")
@@ -284,7 +283,7 @@ class SubstackSavedPostsClient:
 
         return all_posts
 
-    def _fetch_via_dom(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
+    def _fetch_via_dom(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> list[dict[str, Any]]:
         """Fallback method: Render https://substack.com/saved in headless browser and extract post cards."""
         if playwright_instance is not None:
             return self._fetch_via_dom_impl(offset=offset, limit=limit, playwright_instance=playwright_instance)
@@ -295,7 +294,7 @@ class SubstackSavedPostsClient:
             playwright_instance=playwright_instance,
         )
 
-    def _fetch_via_dom_impl(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> List[Dict[str, Any]]:
+    def _fetch_via_dom_impl(self, offset: int = 0, limit: int = 20, playwright_instance: Any = None) -> list[dict[str, Any]]:
         self._ensure_authenticated()
 
         def _do_fetch(p):
@@ -311,7 +310,7 @@ class SubstackSavedPostsClient:
 
             # Extract post elements from DOM with infinite scrolling
             seen_urls = set()
-            results: List[Dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
             target_count = max(offset + limit, 1000)
             max_stale_scrolls = 6
             stale_scrolls = 0
@@ -336,22 +335,22 @@ class SubstackSavedPostsClient:
 
                         parsed = urlparse(clean)
 
-                        def _card_text(selector: str) -> Optional[str]:
+                        def _card_text(card: Any, selector: str) -> str | None:
                             loc = card.locator(selector).first
                             if loc.count() > 0:
                                 text = loc.inner_text().strip()
                                 return text or None
                             return None
 
-                        title = _card_text(".reader2-post-title")
-                        pub_name = _card_text(".pub-name")
-                        excerpt = _card_text(".reader2-paragraph")
+                        title = _card_text(card, ".reader2-post-title")
+                        pub_name = _card_text(card, ".pub-name")
+                        excerpt = _card_text(card, ".reader2-paragraph")
                         # Localized relative display string (e.g. "1 de jul.", "3h");
                         # Substack does not expose a machine-readable ISO date here.
-                        published_display = _card_text(".inbox-item-timestamp")
+                        published_display = _card_text(card, ".inbox-item-timestamp")
 
                         # ".reader2-item-meta" reads like "Author∙8 min read"; take the author part.
-                        meta_text = _card_text(".reader2-item-meta")
+                        meta_text = _card_text(card, ".reader2-item-meta")
                         author = meta_text.split("∙")[0].strip() if meta_text else None
 
                         fallback_pub = parsed.netloc.split(".")[0].capitalize()
@@ -443,7 +442,7 @@ class SubstackSavedPostsClient:
             return "confirmed"
         return "unconfirmed"
 
-    def save_post(self, url: str) -> Tuple[SavedPost, str]:
+    def save_post(self, url: str) -> tuple[SavedPost, str]:
         """Bookmark a post on Substack remotely and return (extracted metadata, confirmation status).
 
         Extracts the post's numeric ID and rich metadata from ``window._preloads``
@@ -457,7 +456,7 @@ class SubstackSavedPostsClient:
         """
         return _run_playwright_sync(self._save_post_impl, url=url)
 
-    def _save_post_impl(self, url: str, playwright_instance: Any = None) -> Tuple[SavedPost, str]:
+    def _save_post_impl(self, url: str, playwright_instance: Any = None) -> tuple[SavedPost, str]:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
 
@@ -529,7 +528,7 @@ class SubstackSavedPostsClient:
         with sync_playwright() as p:
             return _do_save(p)
 
-    def fetch_post_content(self, url: str) -> Dict[str, Any]:
+    def fetch_post_content(self, url: str) -> dict[str, Any]:
         """Fetch a post's full body HTML by visiting its page.
 
         Reads ``window._preloads.post.body_html`` (the same server-rendered
@@ -542,7 +541,7 @@ class SubstackSavedPostsClient:
         """
         return _run_playwright_sync(self._fetch_post_content_impl, url=url)
 
-    def _fetch_post_content_impl(self, url: str, playwright_instance: Any = None) -> Dict[str, Any]:
+    def _fetch_post_content_impl(self, url: str, playwright_instance: Any = None) -> dict[str, Any]:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
 
@@ -578,7 +577,7 @@ class SubstackSavedPostsClient:
         with sync_playwright() as p:
             return _do_fetch(p)
 
-    def unsave_post(self, url: str, post_id: Optional[int] = None) -> str:
+    def unsave_post(self, url: str, post_id: int | None = None) -> str:
         """Unbookmark a post on Substack remotely; returns a confirmation status.
 
         When ``post_id`` (Substack's numeric post ID, i.e. ``SavedPost.substack_post_id``)
@@ -592,7 +591,7 @@ class SubstackSavedPostsClient:
         """
         return _run_playwright_sync(self._unsave_post_impl, url=url, post_id=post_id)
 
-    def _unsave_post_impl(self, url: str, post_id: Optional[int] = None, playwright_instance: Any = None) -> str:
+    def _unsave_post_impl(self, url: str, post_id: int | None = None, playwright_instance: Any = None) -> str:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
 

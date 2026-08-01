@@ -1,9 +1,6 @@
 """Command Line Interface (CLI) for Substack Saved Posts MCP & Sync tool."""
 
-import json
 import sys
-from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -12,15 +9,22 @@ from substack_saved_mcp.database import (
     get_post,
     get_status,
     init_db,
-    list_audiences as db_list_audiences,
-    list_posts as db_list_posts,
-    list_publications as db_list_publications,
-    search_posts as db_search_posts,
     soft_delete_post,
     upsert_post,
 )
+from substack_saved_mcp.database import (
+    list_audiences as db_list_audiences,
+)
+from substack_saved_mcp.database import (
+    list_posts as db_list_posts,
+)
+from substack_saved_mcp.database import (
+    list_publications as db_list_publications,
+)
+from substack_saved_mcp.database import (
+    search_posts as db_search_posts,
+)
 from substack_saved_mcp.mcp_server import run_server
-from substack_saved_mcp.models import SavedPost
 from substack_saved_mcp.substack_client import (
     AuthRequiredError,
     SubstackSavedPostsClient,
@@ -148,12 +152,12 @@ def unsave(url_or_id: str) -> None:
 @click.option("--limit", default=10, help="Maximum search results.")
 def search(
     query: str,
-    publication: Optional[str],
-    audience: Optional[str],
-    published_after: Optional[str],
-    published_before: Optional[str],
-    saved_after: Optional[str],
-    saved_before: Optional[str],
+    publication: str | None,
+    audience: str | None,
+    published_after: str | None,
+    published_before: str | None,
+    saved_after: str | None,
+    saved_before: str | None,
     limit: int,
 ) -> None:
     """Perform full-text search across cached saved posts."""
@@ -194,7 +198,7 @@ def search(
 @click.option("--publication", help="Filter by publication name.")
 @click.option("--audience", help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.")
 @click.option("--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at")
-def list_cmd(limit: int, offset: int, publication: Optional[str], audience: Optional[str], sort_by: str) -> None:
+def list_cmd(limit: int, offset: int, publication: str | None, audience: str | None, sort_by: str) -> None:
     """List saved posts ordered by saved date or publication date."""
     init_db()
     posts = db_list_posts(limit=limit, offset=offset, publication=publication, audience=audience, sort_by=sort_by)

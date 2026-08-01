@@ -1,8 +1,7 @@
 """Unit and integration tests for the sync engine using mock Substack client."""
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-import pytest
+from typing import Any
 
 from substack_saved_mcp.database import get_post, get_status, init_db, list_posts, upsert_post
 from substack_saved_mcp.models import SavedPost
@@ -13,11 +12,11 @@ from substack_saved_mcp.sync import sync_saved_posts
 class MockSubstackClient(SubstackSavedPostsClient):
     """Mock client returning static test fixture payloads."""
 
-    def __init__(self, pages: List[List[Dict[str, Any]]], should_raise_auth: bool = False):
+    def __init__(self, pages: list[list[dict[str, Any]]], should_raise_auth: bool = False):
         self.pages = pages
         self.should_raise_auth = should_raise_auth
 
-    def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def fetch_saved_posts_page(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         if self.should_raise_auth:
             raise AuthRequiredError("Session expired in mock.")
         page_idx = offset // limit
@@ -414,7 +413,7 @@ def test_reader_api_retries_on_429_then_succeeds(tmp_path: Path):
             self.calls += 1
             return res
 
-    slept: List[float] = []
+    slept: list[float] = []
     client = _reader_client(tmp_path)
     posts = client._fetch_all_saved_via_reader_api(
         MockApiContext(), page_size=2, sleep_func=slept.append
@@ -438,7 +437,7 @@ def test_reader_api_gives_up_after_max_retries(tmp_path: Path):
         _seen = None
 
     ctx = MockApiContext()
-    slept: List[float] = []
+    slept: list[float] = []
     client = _reader_client(tmp_path)
     result = client._fetch_all_saved_via_reader_api(
         ctx, page_size=2, max_retries=3, sleep_func=slept.append

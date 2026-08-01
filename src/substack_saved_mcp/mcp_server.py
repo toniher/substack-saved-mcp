@@ -1,7 +1,8 @@
 """FastMCP server exposing tools and resources for searching, retrieving, saving, and unsaving Substack posts."""
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from fastmcp import FastMCP
 
 from substack_saved_mcp.content_utils import format_post_for_llm, html_to_llm_text
@@ -9,12 +10,16 @@ from substack_saved_mcp.database import (
     get_post,
     get_status,
     init_db,
-    list_audiences as db_list_audiences,
     list_posts,
-    list_publications as db_list_publications,
     search_posts,
     soft_delete_post,
     upsert_post,
+)
+from substack_saved_mcp.database import (
+    list_audiences as db_list_audiences,
+)
+from substack_saved_mcp.database import (
+    list_publications as db_list_publications,
 )
 from substack_saved_mcp.models import (
     AudienceSummary,
@@ -34,14 +39,14 @@ mcp = FastMCP("Substack Saved Posts")
 @mcp.tool()
 def search_saved_posts(
     query: str,
-    publication: Optional[str] = None,
-    audience: Optional[str] = None,
-    published_after: Optional[str] = None,
-    published_before: Optional[str] = None,
-    saved_after: Optional[str] = None,
-    saved_before: Optional[str] = None,
+    publication: str | None = None,
+    audience: str | None = None,
+    published_after: str | None = None,
+    published_before: str | None = None,
+    saved_after: str | None = None,
+    saved_before: str | None = None,
     limit: int = 20,
-) -> List[PostSummary]:
+) -> list[PostSummary]:
     """Perform full-text FTS5 search across cached saved posts.
 
     Searches title, excerpt, publication name, author, and content text.
@@ -66,10 +71,10 @@ def search_saved_posts(
 def list_saved_posts(
     limit: int = 20,
     offset: int = 0,
-    publication: Optional[str] = None,
-    audience: Optional[str] = None,
+    publication: str | None = None,
+    audience: str | None = None,
     sort_by: str = "saved_at",
-) -> List[PostSummary]:
+) -> list[PostSummary]:
     """List cached saved posts with pagination and optional publication/audience filters.
 
     sort_by can be 'saved_at' (when post was bookmarked) or 'published_at' (when post was published).
@@ -87,14 +92,14 @@ def list_saved_posts(
 
 
 @mcp.tool()
-def get_saved_post(url_or_id: str) -> Optional[SavedPost]:
+def get_saved_post(url_or_id: str) -> SavedPost | None:
     """Retrieve full cached post details, timestamps (published_at and saved_at), and content by URL or local ID."""
     init_db()
     return get_post(url_or_id)
 
 
 @mcp.tool()
-def save_post(url: str) -> Dict[str, Any]:
+def save_post(url: str) -> dict[str, Any]:
     """Bookmark a Substack post remotely on Substack and save it to the local cache.
 
     Requires an active authenticated Substack session (run 'substack-saved-mcp login' if expired).
@@ -109,7 +114,7 @@ def save_post(url: str) -> Dict[str, Any]:
     client = SubstackSavedPostsClient()
     saved_model, confirmation = client.save_post(url)
     updated_db_post = upsert_post(saved_model)
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "success": True,
         "post": updated_db_post,
         "remote_confirmed": confirmation == "confirmed",
@@ -120,7 +125,7 @@ def save_post(url: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def unsave_post(url_or_id: str) -> Dict[str, Any]:
+def unsave_post(url_or_id: str) -> dict[str, Any]:
     """Unbookmark a Substack post remotely and soft-delete it in local cache.
 
     Soft-deletion preserves post history while removing it from active search/list outputs.
@@ -158,7 +163,7 @@ def unsave_post(url_or_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def get_post_content(url_or_id: str, force_refetch: bool = False) -> Dict[str, Any]:
+def get_post_content(url_or_id: str, force_refetch: bool = False) -> dict[str, Any]:
     """Fetch a saved post's full content, cleaned and formatted for LLM consumption.
 
     Returns the cached content_text if a previous fetch already stored it, unless
@@ -231,14 +236,14 @@ def get_post_content(url_or_id: str, force_refetch: bool = False) -> Dict[str, A
 
 
 @mcp.tool()
-def list_publications() -> List[PublicationSummary]:
+def list_publications() -> list[PublicationSummary]:
     """List all publications in local cache with post counts."""
     init_db()
     return db_list_publications()
 
 
 @mcp.tool()
-def list_audiences() -> List[AudienceSummary]:
+def list_audiences() -> list[AudienceSummary]:
     """List distinct audience tiers present in local cache with post counts.
 
     Discovers actual values in use (e.g. "everyone", "only_paid") rather than a

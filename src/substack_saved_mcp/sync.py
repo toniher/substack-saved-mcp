@@ -1,10 +1,9 @@
 """Sync engine for retrieving Substack saved posts into the local SQLite cache."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from typing import Any
 
 from substack_saved_mcp.database import (
     finish_sync_run,
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 WORDS_PER_MINUTE = 200
 
 
-def _first_positive_int(source: Dict[str, Any], *keys: str) -> Optional[int]:
+def _first_positive_int(source: dict[str, Any], *keys: str) -> int | None:
     """Return the first of ``keys`` whose value coerces to a positive int, else None."""
     for key in keys:
         val = source.get(key)
@@ -39,7 +38,7 @@ def _first_positive_int(source: Dict[str, Any], *keys: str) -> Optional[int]:
     return None
 
 
-def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
+def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
     """Parse raw Substack API JSON payload or DOM dict into a typed SavedPost object."""
     # Check if raw_data is a normalized dictionary from DOM extraction. Use an explicit
     # marker: reader-API post objects also carry a "canonical_url" key and must instead
@@ -114,8 +113,8 @@ def parse_remote_post(raw_data: Dict[str, Any]) -> SavedPost:
 
 def sync_saved_posts(
     force: bool = False,
-    db_path: Optional[Path] = None,
-    client: Optional[SubstackSavedPostsClient] = None,
+    db_path: Path | None = None,
+    client: SubstackSavedPostsClient | None = None,
 ) -> SyncRun:
     """Execute an incremental or full sync of Substack saved posts into SQLite cache."""
     init_db(db_path)
@@ -131,7 +130,7 @@ def sync_saved_posts(
     # Only populated meaningfully for a force/full sync, which enumerates every
     # currently-saved remote post; an incremental sync may stop early and its
     # partial list must never be used to infer removals.
-    remote_urls: List[str] = []
+    remote_urls: list[str] = []
 
     page_size = 50
     offset = 0
@@ -161,7 +160,7 @@ def sync_saved_posts(
                     else:
                         consecutive_matches = 0
 
-                upserted_post = upsert_post(parsed_post, db_path=db_path)
+                upsert_post(parsed_post, db_path=db_path)
                 total_upserted += 1
 
             if not force and consecutive_matches >= MAX_CONSECUTIVE_MATCHES:
@@ -191,8 +190,8 @@ def sync_saved_posts(
         )
         return SyncRun(
             id=sync_id,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            started_at=datetime.now(UTC).isoformat(),
+            completed_at=datetime.now(UTC).isoformat(),
             status="success",
             sync_mode=sync_mode,
             fetched_count=total_fetched,
@@ -212,8 +211,8 @@ def sync_saved_posts(
         )
         return SyncRun(
             id=sync_id,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            started_at=datetime.now(UTC).isoformat(),
+            completed_at=datetime.now(UTC).isoformat(),
             status="auth_required",
             sync_mode=sync_mode,
             fetched_count=total_fetched,
@@ -221,7 +220,7 @@ def sync_saved_posts(
             error_message=msg,
         )
     except Exception as e:
-        msg = f"Sync failed: {str(e)}"
+        msg = f"Sync failed: {e!s}"
         logger.exception(msg)
         finish_sync_run(
             sync_id=sync_id,
@@ -233,8 +232,8 @@ def sync_saved_posts(
         )
         return SyncRun(
             id=sync_id,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            started_at=datetime.now(UTC).isoformat(),
+            completed_at=datetime.now(UTC).isoformat(),
             status="failed",
             sync_mode=sync_mode,
             fetched_count=total_fetched,

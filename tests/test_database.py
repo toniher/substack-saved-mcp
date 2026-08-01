@@ -1,7 +1,8 @@
 """Unit and integration tests for SQLite database repository and FTS5 search."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from substack_saved_mcp.database import (
     get_post,
