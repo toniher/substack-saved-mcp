@@ -1,5 +1,7 @@
 # Substack Saved Posts MCP & CLI
 
+[![PyPI version](https://img.shields.io/pypi/v/substack-saved-mcp.svg)](https://pypi.org/project/substack-saved-mcp/)
+
 A local, stdio-based Model Context Protocol (MCP) server and sync engine for your saved/bookmarked Substack posts.
 
 ## Features
@@ -17,9 +19,16 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 
 [`uv`](https://github.com/astral-sh/uv) is the recommended fast Python package manager for installing and running `substack-saved-mcp`.
 
-### Option A: Install System-wide as a Tool (`uv tool install`)
+### Option A: Install from PyPI as a System-wide Tool (`uv tool install`)
 
-Install directly from your local repository folder:
+Install the published package from [PyPI](https://pypi.org/project/substack-saved-mcp/):
+
+```bash
+# Install system-wide into an isolated uv environment
+uv tool install substack-saved-mcp
+```
+
+To install directly from a local repository folder instead:
 
 ```bash
 # Navigate to the repository
