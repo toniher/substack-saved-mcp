@@ -20,6 +20,7 @@ from substack_saved_mcp.substack_client import (
 )
 from substack_saved_mcp.sync import (
     parse_remote_note,
+    parse_remote_post,
     sync_saved_notes,
     sync_saved_posts,
 )
@@ -614,6 +615,8 @@ def test_reader_api_cursor_pagination(tmp_path: Path):
     # Client enriches each post with its publication object and author.
     assert posts[0]["publication"]["name"] == "Pub A"
     assert posts[0]["author_name"] == "Alice"
+    # A clean "no more pages" completion is never mistaken for a truncation.
+    assert client._api_truncated is False
 
 
 class _RetryResponse:
@@ -722,3 +725,426 @@ def test_retry_after_seconds_caps_and_falls_back(tmp_path: Path):
     )
     # No header at all -> backoff.
     assert client._retry_after_seconds(_RetryResponse(), 1) == 1.0
+
+
+def test_unified_posts_cursor_pagination(tmp_path: Path):
+    """Mirrors test_reader_api_cursor_pagination for the unified reader/saved
+    endpoint: pagination is driven by re-submitting the server's own nextCursor
+    value rather than an after=<ISO saved_at> cursor."""
+    client = _reader_client(tmp_path)
+
+    page1 = {
+        "items": [
+            {
+                "post": {
+                    "id": 1,
+                    "canonical_url": "https://a.substack.com/p/one",
+                    "title": "P1",
+                    "post_date": "2026-06-10T00:00:00Z",
+                    "saved_at": "2026-06-20T00:00:00Z",
+                },
+                "publication": {"name": "Pub A"},
+            },
+            {
+                "post": {
+                    "id": 2,
+                    "canonical_url": "https://b.substack.com/p/two",
+                    "title": "P2",
+                    "post_date": "2026-06-09T00:00:00Z",
+                    "saved_at": "2026-06-18T00:00:00Z",
+                },
+                "publication": {"name": "Pub B"},
+            },
+        ],
+        "nextCursor": "opaque-token-1",
+    }
+    page2 = {
+        "items": [
+            {
+                "post": {
+                    "id": 3,
+                    "canonical_url": "https://c.substack.com/p/three",
+                    "title": "P3",
+                    "post_date": "2026-06-08T00:00:00Z",
+                    "saved_at": "2026-06-15T00:00:00Z",
+                },
+                "publication": {"name": "Pub C"},
+            },
+        ],
+        "nextCursor": None,
+    }
+
+    class MockResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status = 200
+            self.ok = True
+            self.url = "https://substack.com/api/v1/reader/saved"
+
+        def json(self):
+            return self._payload
+
+    class MockApiContext:
+        def get(self, url):
+            if "cursor=" in url:
+                return MockResponse(page2)
+            return MockResponse(page1)
+
+    posts = client._fetch_all_saved_posts_via_unified_api(MockApiContext())
+
+    assert [item["post"]["id"] for item in posts] == [1, 2, 3]
+    # A clean "no nextCursor" completion is never mistaken for a truncation.
+    assert client._unified_api_truncated is False
+
+
+def test_unified_posts_pagination_dedupes_by_canonical_url(tmp_path: Path):
+    client = _reader_client(tmp_path)
+
+    dup_item = {
+        "post": {
+            "id": 1,
+            "canonical_url": "https://a.substack.com/p/one?utm_source=substack",
+        },
+        "publication": {"name": "Pub A"},
+    }
+    page1 = {"items": [dup_item], "nextCursor": "tok"}
+    page2 = {
+        "items": [
+            {
+                "post": {"id": 1, "canonical_url": "https://a.substack.com/p/one"},
+                "publication": {"name": "Pub A"},
+            }
+        ],
+        "nextCursor": None,
+    }
+
+    class MockResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status = 200
+            self.ok = True
+            self.url = "https://substack.com/api/v1/reader/saved"
+
+        def json(self):
+            return self._payload
+
+    class MockApiContext:
+        def get(self, url):
+            return MockResponse(page2) if "cursor=" in url else MockResponse(page1)
+
+    posts = client._fetch_all_saved_posts_via_unified_api(MockApiContext())
+
+    assert len(posts) == 1
+
+
+def test_unified_posts_retries_on_429_then_succeeds(tmp_path: Path):
+    ok_payload = {
+        "items": [
+            {
+                "post": {"id": 1, "canonical_url": "https://a.substack.com/p/one"},
+                "publication": {"name": "Pub A"},
+            }
+        ],
+        "nextCursor": None,
+    }
+    responses = [
+        _RetryResponse(status=429, headers={"retry-after": "2"}),
+        _RetryResponse(status=200, payload=ok_payload),
+    ]
+
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            res = responses[self.calls]
+            self.calls += 1
+            return res
+
+    slept: list[float] = []
+    client = _reader_client(tmp_path)
+    posts = client._fetch_all_saved_posts_via_unified_api(
+        MockApiContext(), sleep_func=slept.append
+    )
+
+    assert [item["post"]["id"] for item in posts] == [1]
+    assert slept == [2.0]
+
+
+def test_unified_posts_gives_up_after_max_retries(tmp_path: Path):
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            self.calls += 1
+            return _RetryResponse(status=429)
+
+    ctx = MockApiContext()
+    slept: list[float] = []
+    client = _reader_client(tmp_path)
+    result = client._fetch_all_saved_posts_via_unified_api(
+        ctx, max_retries=3, sleep_func=slept.append
+    )
+
+    assert result is None
+    assert ctx.calls == 4
+    assert slept == [0.5, 1.0, 2.0]
+
+
+def test_parse_remote_post_unified_item_shape():
+    """parse_remote_post already resolves {post, publication} items (the shape
+    shared by the unified reader/saved endpoint's filter=posts and filter=all);
+    this pins that behavior against a realistic unified payload item."""
+    item = {
+        "post": {
+            "id": 42,
+            "canonical_url": "https://pub.substack.com/p/some-post",
+            "title": "Some Post",
+            "post_date": "2026-06-01T00:00:00Z",
+            "audience": "everyone",
+        },
+        "publication": {"name": "Pub Name", "subdomain": "pub"},
+    }
+
+    post = parse_remote_post(item)
+
+    assert post.substack_post_id == "42"
+    assert post.url == "https://pub.substack.com/p/some-post"
+    assert post.title == "Some Post"
+    assert post.publication_name == "Pub Name"
+    assert post.published_at == "2026-06-01T00:00:00Z"
+
+
+def test_parse_remote_post_unified_saved_at_from_post_object():
+    """The unified endpoint nests saved_at under "post" rather than at the item's
+    top level (unlike the legacy reader-posts API); parse_remote_post must check
+    both rather than only the item-level key."""
+    item = {
+        "post": {
+            "id": 42,
+            "canonical_url": "https://pub.substack.com/p/some-post",
+            "saved_at": "2026-06-20T00:00:00Z",
+        },
+        "publication": {},
+    }
+
+    post = parse_remote_post(item)
+
+    assert post.saved_at == "2026-06-20T00:00:00Z"
+
+
+def test_parse_remote_post_unified_saved_at_never_fabricated():
+    item = {
+        "post": {"id": 42, "canonical_url": "https://pub.substack.com/p/some-post"},
+        "publication": {},
+    }
+
+    post = parse_remote_post(item)
+
+    assert post.saved_at is None
+
+
+def test_reader_api_marks_truncated_on_midstream_429_exhaustion(tmp_path: Path):
+    """A 429 that survives every retry on page 1 is 'unavailable' (None,
+    nothing collected yet). But if it happens on a LATER page, after some
+    posts were already collected, the fetcher must return that partial list
+    AND flag it as truncated — not report it as if it were the complete
+    remote saved set."""
+    page1 = {
+        "posts": [
+            {
+                "id": 1,
+                "canonical_url": "https://a.substack.com/p/one",
+                "saved_at": "2026-06-20T00:00:00Z",
+            }
+        ],
+        "publications": [],
+        "more": True,
+    }
+
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            self.calls += 1
+            if self.calls == 1:
+                return _RetryResponse(status=200, payload=page1)
+            return _RetryResponse(status=429)  # every page-2 attempt 429s
+
+    client = _reader_client(tmp_path)
+    slept: list[float] = []
+    posts = client._fetch_all_saved_via_reader_api(
+        MockApiContext(), page_size=1, max_retries=3, sleep_func=slept.append
+    )
+
+    assert [p["id"] for p in posts] == [1]  # partial data kept, not discarded
+    assert client._api_truncated is True
+    assert client.is_posts_fetch_truncated() is False  # cache not populated yet
+
+    client._api_cache = posts
+    assert client.is_posts_fetch_truncated() is True
+
+
+def test_unified_posts_marks_truncated_on_midstream_429_exhaustion(tmp_path: Path):
+    page1 = {
+        "items": [
+            {
+                "post": {"id": 1, "canonical_url": "https://a.substack.com/p/one"},
+                "publication": {"name": "Pub A"},
+            }
+        ],
+        "nextCursor": "opaque-token-1",
+    }
+
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            self.calls += 1
+            if self.calls == 1:
+                return _RetryResponse(status=200, payload=page1)
+            return _RetryResponse(status=429)
+
+    client = _reader_client(tmp_path)
+    slept: list[float] = []
+    posts = client._fetch_all_saved_posts_via_unified_api(
+        MockApiContext(), max_retries=3, sleep_func=slept.append
+    )
+
+    assert [item["post"]["id"] for item in posts] == [1]
+    assert client._unified_api_truncated is True
+
+    client._unified_api_cache = posts
+    assert client.is_posts_fetch_truncated() is True
+
+
+def test_notes_api_marks_truncated_on_midstream_429_exhaustion(tmp_path: Path):
+    page1 = {
+        "items": [{"comment": {"id": 1, "body": "first"}}],
+        "nextCursor": "opaque-token-1",
+    }
+
+    class MockApiContext:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url):
+            self.calls += 1
+            if self.calls == 1:
+                return _RetryResponse(status=200, payload=page1)
+            return _RetryResponse(status=429)
+
+    client = _reader_client(tmp_path)
+    slept: list[float] = []
+    notes = client._fetch_all_saved_notes_via_api(
+        MockApiContext(), max_retries=3, sleep_func=slept.append
+    )
+
+    assert [item["comment"]["id"] for item in notes] == [1]
+    assert client._notes_api_truncated is True
+    assert client.is_notes_fetch_truncated() is False  # cache not populated yet
+
+    client._notes_api_cache = notes
+    assert client.is_notes_fetch_truncated() is True
+
+
+def test_is_posts_fetch_truncated_false_by_default(tmp_path: Path):
+    client = _reader_client(tmp_path)
+    assert client.is_posts_fetch_truncated() is False
+
+
+def test_is_posts_fetch_truncated_safe_on_bare_subclass():
+    """MockSubstackClient-style test doubles override __init__ without calling
+    super().__init__(), so these instance attributes never get set. The
+    getattr() defaults must make that report 'not truncated' rather than
+    raising AttributeError."""
+
+    class BareClient(SubstackSavedPostsClient):
+        def __init__(self):
+            pass
+
+    assert BareClient().is_posts_fetch_truncated() is False
+    assert BareClient().is_notes_fetch_truncated() is False
+
+
+class TruncatedMockSubstackClient(MockSubstackClient):
+    """Simulates a posts fetch whose underlying source hit a persistent
+    mid-pagination failure, without needing a real 429-retry mock context."""
+
+    def is_posts_fetch_truncated(self) -> bool:
+        return True
+
+
+def test_force_sync_skips_reconcile_when_fetch_truncated(tmp_path: Path):
+    """The actual danger the truncation flag exists to prevent: a --force sync
+    must not soft-delete a post just because a truncated fetch didn't include
+    it — that post may still be saved remotely; the fetch just couldn't reach
+    it this run."""
+    db_path = tmp_path / "truncated_reconcile_test.sqlite"
+    init_db(db_path)
+
+    still_saved_remotely = SavedPost(
+        url="https://pub1.substack.com/p/still-saved",
+        title="Still Saved",
+        publication_name="Pub 1",
+        is_saved=1,
+    )
+    upsert_post(still_saved_remotely, db_path=db_path)
+
+    mock_payloads = [
+        [
+            {
+                "created_at": "2026-06-01T10:00:00Z",
+                "post": {
+                    "id": 101,
+                    "title": "Post 1",
+                    "canonical_url": "https://pub1.substack.com/p/post-1",
+                    "publication": {"name": "Pub 1"},
+                },
+            },
+        ]
+    ]
+    client = TruncatedMockSubstackClient(pages=mock_payloads)
+    run = sync_saved_posts(force=True, db_path=db_path, client=client)
+
+    assert run.status == "partial"
+    assert run.reconciled_count == 0
+
+    # The pre-existing post is NOT soft-deleted, even though it's absent from
+    # this run's (truncated) fetch.
+    still_there = get_post("https://pub1.substack.com/p/still-saved", db_path=db_path)
+    assert still_there.is_saved == 1
+    assert still_there.unsaved_at is None
+
+
+class TruncatedMockNotesClient(MockNotesClient):
+    def is_notes_fetch_truncated(self) -> bool:
+        return True
+
+
+def test_sync_notes_force_skips_reconcile_when_fetch_truncated(tmp_path: Path):
+    db_path = tmp_path / "truncated_notes_reconcile_test.sqlite"
+    init_db(db_path)
+
+    still_saved_remotely = SavedNote(
+        substack_note_id="999",
+        url="https://substack.com/@stillsaved/note/c-999",
+        body_text="still saved",
+        is_saved=1,
+    )
+    upsert_note(still_saved_remotely, db_path=db_path)
+
+    client = TruncatedMockNotesClient(pages=[[_note_item(1)]])
+    run = sync_saved_notes(force=True, db_path=db_path, client=client)
+
+    assert run.status == "partial"
+    assert run.reconciled_count == 0
+
+    still_there = get_note(
+        "https://substack.com/@stillsaved/note/c-999", db_path=db_path
+    )
+    assert still_there.is_saved == 1
+    assert still_there.unsaved_at is None

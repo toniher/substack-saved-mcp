@@ -577,10 +577,15 @@ class MockRequestForReaderApi:
         return self._api_context
 
 
-def test_fetch_saved_posts_page_slices_cache(tmp_path: Path):
+def test_fetch_saved_posts_page_slices_cache(tmp_path: Path, monkeypatch):
     """Mirrors test_fetch_saved_notes_page_slices_cache: the caching/slicing
     branch of _fetch_saved_posts_page_impl previously had no test coverage at
-    all because the method couldn't accept a Playwright double."""
+    all because the method couldn't accept a Playwright double. Forces the
+    legacy source explicitly: the mock context below is URL-agnostic (it
+    returns the legacy-shaped payload for any request), and 'auto' now tries
+    the unified endpoint first, which would otherwise see this same payload,
+    find no "items" key, and silently resolve to an empty page."""
+    monkeypatch.setenv("SUBSTACK_SAVED_POSTS_SOURCE", "legacy")
     client = _client(tmp_path)
     payload = {
         "posts": [
@@ -607,3 +612,195 @@ def test_fetch_saved_posts_page_slices_cache(tmp_path: Path):
         limit=2, offset=2, playwright_instance=pw
     )
     assert len(page2) == 1
+
+
+def test_reset_cache_clears_unified_cache(tmp_path: Path):
+    client = _client(tmp_path)
+    client._unified_api_cache = [{"post": {"id": 1}}]
+    client._unified_api_failed = True
+
+    client.reset_cache()
+
+    assert client._unified_api_cache is None
+    assert client._unified_api_failed is False
+
+
+class MockCombinedApiContext:
+    """Distinguishes the legacy reader-posts endpoint from the unified
+    reader/saved endpoint by URL, so a single context can drive the source-chain
+    fallback tests."""
+
+    def __init__(self, legacy_ok: bool = True, unified_ok: bool = True):
+        self._legacy_ok = legacy_ok
+        self._unified_ok = unified_ok
+        self.legacy_calls = 0
+        self.unified_calls = 0
+
+    def get(self, url):
+        if "reader/posts" in url:
+            self.legacy_calls += 1
+            if not self._legacy_ok:
+                return MockReaderApiResponseGeneric(ok=False, status=404)
+            return MockReaderApiResponseGeneric(
+                payload={
+                    "posts": [
+                        {
+                            "id": 1,
+                            "canonical_url": "https://a.substack.com/p/one",
+                            "saved_at": "2026-06-20T00:00:00Z",
+                        }
+                    ],
+                    "publications": [],
+                    "more": False,
+                }
+            )
+        self.unified_calls += 1
+        if not self._unified_ok:
+            return MockReaderApiResponseGeneric(ok=False, status=404)
+        return MockReaderApiResponseGeneric(
+            payload={
+                "items": [
+                    {
+                        "post": {
+                            "id": 2,
+                            "canonical_url": "https://b.substack.com/p/two",
+                            "saved_at": "2026-06-19T00:00:00Z",
+                        },
+                        "publication": {"name": "Pub B"},
+                    }
+                ],
+                "nextCursor": None,
+            }
+        )
+
+
+class MockReaderApiResponseGeneric:
+    def __init__(self, payload=None, ok=True, status=200):
+        self._payload = payload or {}
+        self.ok = ok
+        self.status = status
+        self.url = "https://substack.com/"
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_saved_posts_page_auto_prefers_unified_when_available(tmp_path: Path):
+    """A live parity comparison (see CLAUDE.md) found the unified reader/saved
+    endpoint a strict superset of the legacy reader-posts API (missing 95 posts
+    legacy had 1 the unified endpoint lacked, saved_at on 100% of items,
+    correctly ordered), so 'auto' now tries unified first and never touches
+    legacy when it succeeds."""
+    client = _client(tmp_path)
+    api_context = MockCombinedApiContext(legacy_ok=True, unified_ok=True)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=10, offset=0, playwright_instance=pw
+    )
+
+    assert [item["post"]["id"] for item in page] == [2]
+    assert api_context.legacy_calls == 0
+    assert client._api_cache is None
+
+
+def test_fetch_saved_posts_page_falls_back_to_legacy_when_unified_unavailable(
+    tmp_path: Path,
+):
+    client = _client(tmp_path)
+    api_context = MockCombinedApiContext(legacy_ok=True, unified_ok=False)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=10, offset=0, playwright_instance=pw
+    )
+
+    assert [item["id"] for item in page] == [1]
+    assert client._unified_api_failed is True
+    assert client._api_cache is not None
+    assert api_context.legacy_calls >= 1
+
+
+def test_fetch_saved_posts_page_falls_back_to_dom_when_both_apis_unavailable(
+    tmp_path: Path, monkeypatch
+):
+    client = _client(tmp_path)
+    api_context = MockCombinedApiContext(legacy_ok=False, unified_ok=False)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    dom_calls: list[tuple[int, int]] = []
+
+    def fake_dom(self, offset=0, limit=20, playwright_instance=None):
+        dom_calls.append((offset, limit))
+        return [{"_dom": True, "canonical_url": "https://x.substack.com/p/y"}]
+
+    monkeypatch.setattr(SubstackSavedPostsClient, "_fetch_via_dom", fake_dom)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=10, offset=0, playwright_instance=pw
+    )
+
+    assert dom_calls == [(0, 10)]
+    assert page[0]["_dom"] is True
+    assert client._api_failed is True
+    assert client._unified_api_failed is True
+
+
+def test_fetch_saved_posts_page_source_forced_unified_skips_legacy(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SUBSTACK_SAVED_POSTS_SOURCE", "unified")
+    client = _client(tmp_path)
+    api_context = MockCombinedApiContext(legacy_ok=True, unified_ok=True)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=10, offset=0, playwright_instance=pw
+    )
+
+    assert [item["post"]["id"] for item in page] == [2]
+    assert api_context.legacy_calls == 0
+    assert client._api_cache is None
+
+
+def test_fetch_saved_posts_page_source_forced_dom_skips_both_apis(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SUBSTACK_SAVED_POSTS_SOURCE", "dom")
+    client = _client(tmp_path)
+    api_context = MockCombinedApiContext(legacy_ok=True, unified_ok=True)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    dom_calls: list[tuple[int, int]] = []
+
+    def fake_dom(self, offset=0, limit=20, playwright_instance=None):
+        dom_calls.append((offset, limit))
+        return [{"_dom": True, "canonical_url": "https://x.substack.com/p/y"}]
+
+    monkeypatch.setattr(SubstackSavedPostsClient, "_fetch_via_dom", fake_dom)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=10, offset=0, playwright_instance=pw
+    )
+
+    assert dom_calls == [(0, 10)]
+    assert api_context.legacy_calls == 0
+    assert api_context.unified_calls == 0
+    assert page[0]["_dom"] is True
+
+
+def test_probe_api_get_returns_json(tmp_path: Path):
+    client = _client(tmp_path)
+
+    class ProbeApiContext:
+        def get(self, url):
+            return MockReaderApiResponseGeneric(payload={"hello": "world"})
+
+    pw = MockPlaywrightForReaderApi(ProbeApiContext())
+
+    result = client._probe_api_get_impl(
+        "https://substack.com/api/v1/reader/saved?filter=posts",
+        playwright_instance=pw,
+    )
+
+    assert result == {"hello": "world"}

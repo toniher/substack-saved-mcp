@@ -184,6 +184,29 @@ export SUBSTACK_SAVED_DB_PATH="/path/to/my/custom_database.sqlite"
 export SUBSTACK_SAVED_DATA_DIR="/path/to/my/data_dir"
 ```
 
+### Which Substack API does syncing saved posts use?
+
+Saved posts are fetched from Substack's newer unified reader API by default, with
+automatic fallback to an older, posts-only API and finally to headless browser
+scraping if needed — you shouldn't normally need to think about this. If you ever
+want to force a specific source (e.g. while troubleshooting), set:
+```bash
+export SUBSTACK_SAVED_POSTS_SOURCE="unified"  # or "legacy" or "dom"
+```
+Leave it unset (or `"auto"`) for the default, self-healing behavior.
+
+### What does a "partial" sync status mean?
+
+If Substack rate-limits (HTTP 429) a sync so heavily that a page of results
+can't be fetched even after retrying, the sync keeps whatever it already
+fetched rather than failing outright, and reports `status: partial` (instead
+of `success`) in `substack-saved-mcp status` or the sync tool's response.
+When this happens on a `sync --force`, reconciliation (soft-deleting posts/notes
+no longer in the remote list) is automatically skipped for that run, so a post
+or note that merely couldn't be fetched is never mistaken for one you actually
+unsaved on Substack. Just run `sync` again later — a subsequent successful run
+picks up anything that was missed.
+
 ### Will a browser window pop up when running as an MCP server?
 
 **No, a visible browser window will not open during normal MCP operations.**

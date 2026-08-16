@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from substack_saved_mcp.config import get_browser_dir, get_storage_state_path
+from substack_saved_mcp.config import (
+    get_browser_dir,
+    get_saved_posts_source,
+    get_storage_state_path,
+)
 from substack_saved_mcp.content_utils import note_body_to_text
 from substack_saved_mcp.models import SavedNote, SavedPost
 from substack_saved_mcp.url_utils import canonicalize_url
@@ -146,20 +150,57 @@ class SubstackSavedPostsClient:
         self._dom_cache: list[dict[str, Any]] | None = None
         self._api_cache: list[dict[str, Any]] | None = None
         self._api_failed: bool = False
+        self._api_truncated: bool = False
+        self._unified_api_cache: list[dict[str, Any]] | None = None
+        self._unified_api_failed: bool = False
+        self._unified_api_truncated: bool = False
         self._notes_api_cache: list[dict[str, Any]] | None = None
         self._notes_api_failed: bool = False
+        self._notes_api_truncated: bool = False
 
     def reset_cache(self) -> None:
         """Reset cached posts and notes extraction (reader API and DOM fallback).
 
         Notes and posts caches are kept separate so a sync of one entity can
-        never poison the other's mid-run cache.
+        never poison the other's mid-run cache. The legacy and unified posts
+        caches are likewise separate, so one source's failure can't poison the
+        other's mid-run cache either.
         """
         self._dom_cache = None
         self._api_cache = None
         self._api_failed = False
+        self._api_truncated = False
+        self._unified_api_cache = None
+        self._unified_api_failed = False
+        self._unified_api_truncated = False
         self._notes_api_cache = None
         self._notes_api_failed = False
+        self._notes_api_truncated = False
+
+    def is_posts_fetch_truncated(self) -> bool:
+        """True if the currently cached saved-posts source only got a partial
+        list because a persistent failure (e.g. a 429 that survived every
+        retry) cut its pagination short, rather than a clean "no more pages"
+        termination. A --force sync must not reconcile (soft-delete) against a
+        truncated list: a post absent only because it couldn't be fetched would
+        look identical to one genuinely unsaved on Substack.
+
+        Uses getattr() defaults rather than reading the instance attributes
+        directly so a test double that overrides __init__ without calling
+        super().__init__() (the established pattern in this repo's sync tests)
+        safely reports "not truncated" instead of raising AttributeError.
+        """
+        if getattr(self, "_api_cache", None) is not None:
+            return getattr(self, "_api_truncated", False)
+        if getattr(self, "_unified_api_cache", None) is not None:
+            return getattr(self, "_unified_api_truncated", False)
+        return False
+
+    def is_notes_fetch_truncated(self) -> bool:
+        """Notes counterpart of is_posts_fetch_truncated(); see its docstring."""
+        if getattr(self, "_notes_api_cache", None) is not None:
+            return getattr(self, "_notes_api_truncated", False)
+        return False
 
     def _ensure_authenticated(self) -> None:
         """Check if storage state exists."""
@@ -181,19 +222,63 @@ class SubstackSavedPostsClient:
         self, limit: int = 50, offset: int = 0, playwright_instance: Any = None
     ) -> list[dict[str, Any]]:
         self._ensure_authenticated()
+        source = get_saved_posts_source()
 
         def _do_fetch(p):
-            # Prefer the reader inbox API: it returns the real bookmark timestamp
-            # (saved_at) and an ISO publication date (post_date) per post. The full
-            # saved list is fetched once via cursor pagination and cached, then sliced
+            api_context_box: dict[str, Any] = {}
+
+            def api_context() -> Any:
+                if "ctx" not in api_context_box:
+                    api_context_box["ctx"] = p.request.new_context(
+                        storage_state=str(self.state_path)
+                    )
+                return api_context_box["ctx"]
+
+            # Source chain: the unified reader/saved?filter=posts endpoint (the
+            # same one notes uses with filter=notes) is preferred, based on a
+            # live parity comparison run via `compare-saved-apis` against a real
+            # account (see CLAUDE.md): of 1079 posts the unified endpoint
+            # returned, the legacy reader-posts API was missing 95 of them (and
+            # had only 1 the unified endpoint lacked) — legacy silently
+            # truncates when a mid-pagination 429 survives all retries (see
+            # `_fetch_all_saved_via_reader_api`'s `return all_posts if all_posts
+            # else None`, which returns a partial list with no "this is
+            # incomplete" signal). The unified endpoint had a real `saved_at` on
+            # 100% of items, correctly ordered newest-first, and 100% on
+            # `wordcount` (confirming that long-unconfirmed field name). Legacy
+            # is kept as the automatic next fallback for when the unified
+            # endpoint itself is unavailable/rate-limited, then DOM extraction
+            # as the last resort. SUBSTACK_SAVED_POSTS_SOURCE forces a single
+            # source for testing/rollback without a code change. Each source is
+            # fetched once via its own cursor pagination and cached, then sliced
             # by offset so the caller keeps a simple offset/limit interface.
-            if self._api_cache is None and not self._api_failed:
-                api_context = p.request.new_context(storage_state=str(self.state_path))
-                self._api_cache = self._fetch_all_saved_via_reader_api(api_context)
+            if (
+                source in ("auto", "unified")
+                and self._unified_api_cache is None
+                and not self._unified_api_failed
+            ):
+                self._unified_api_cache = self._fetch_all_saved_posts_via_unified_api(
+                    api_context()
+                )
+                if self._unified_api_cache is None:
+                    self._unified_api_failed = True
+                    logger.warning(
+                        "Unified reader API unavailable; trying next source."
+                    )
+
+            if self._unified_api_cache is not None:
+                return self._unified_api_cache[offset : offset + limit]
+
+            if (
+                source in ("auto", "legacy")
+                and self._api_cache is None
+                and not self._api_failed
+            ):
+                self._api_cache = self._fetch_all_saved_via_reader_api(api_context())
                 if self._api_cache is None:
                     self._api_failed = True
                     logger.warning(
-                        "Reader inbox API unavailable; falling back to DOM extraction."
+                        "Legacy reader inbox API unavailable; falling back to DOM extraction."
                     )
 
             if self._api_cache is not None:
@@ -275,6 +360,7 @@ class SubstackSavedPostsClient:
         """
         from urllib.parse import quote
 
+        self._api_truncated = False
         all_posts: list[dict[str, Any]] = []
         seen_urls = set()
         # "after=X" returns posts saved before X (newest first); a far-future sentinel
@@ -292,13 +378,20 @@ class SubstackSavedPostsClient:
                     "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
                 )
             if not res.ok:
-                # Unavailable on the first page → signal fallback; mid-stream → keep what we have.
+                # Unavailable on the first page → signal fallback; mid-stream →
+                # keep what we have, but flag it as a partial/truncated list so
+                # the caller never treats it as the complete remote saved set
+                # (see is_posts_fetch_truncated()).
+                if all_posts:
+                    self._api_truncated = True
                 return all_posts if all_posts else None
 
             try:
                 data = res.json()
             except Exception as e:
                 logger.warning(f"JSON parsing error from reader inbox API: {e}.")
+                if all_posts:
+                    self._api_truncated = True
                 return all_posts if all_posts else None
 
             posts = data.get("posts") or []
@@ -342,6 +435,125 @@ class SubstackSavedPostsClient:
             cursor = page_min_saved
 
         return all_posts
+
+    def _fetch_all_saved_posts_via_unified_api(
+        self,
+        api_context: Any,
+        max_posts: int = 2000,
+        max_retries: int = 3,
+        sleep_func=time.sleep,
+    ) -> list[dict[str, Any]] | None:
+        """Fetch the full saved-posts list via Substack's unified reader/saved
+        endpoint (``GET /api/v1/reader/saved?filter=posts``) — the same endpoint
+        notes uses with ``filter=notes``.
+
+        Structurally a sibling of ``_fetch_all_saved_notes_via_api``, not a
+        generalization of the legacy ``_fetch_all_saved_via_reader_api``: pagination
+        here is driven by an opaque server-issued ``nextCursor`` rather than an
+        ``after=<ISO saved_at>`` cursor, and there is no controllable page size.
+        Each returned item is the raw ``{"post": {...}, "publication": {...}}``
+        shape ``parse_remote_post`` already resolves via ``raw_data.get("post")``.
+        Returns ``None`` if the endpoint is unavailable on the first page so the
+        caller can fall back to another source.
+        """
+        from urllib.parse import quote
+
+        self._unified_api_truncated = False
+        all_posts: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        cursor: str | None = None
+
+        while len(all_posts) < max_posts:
+            url = "https://substack.com/api/v1/reader/saved?filter=posts"
+            if cursor:
+                url += f"&cursor={quote(cursor)}"
+
+            res = self._reader_api_get(
+                api_context, url, max_retries=max_retries, sleep_func=sleep_func
+            )
+            if res.status in (401, 403) or "sign-in" in res.url:
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
+            if not res.ok:
+                # Unavailable on the first page → signal fallback; mid-stream →
+                # keep what we have, but flag it as truncated (see
+                # is_posts_fetch_truncated()) so a --force sync never mistakes
+                # "couldn't fetch the rest" for "the rest was unsaved".
+                if all_posts:
+                    self._unified_api_truncated = True
+                return all_posts if all_posts else None
+
+            try:
+                data = res.json()
+            except Exception as e:
+                logger.warning(f"JSON parsing error from unified saved-posts API: {e}.")
+                if all_posts:
+                    self._unified_api_truncated = True
+                return all_posts if all_posts else None
+
+            items = data.get("items") or []
+            if not items:
+                break
+
+            before_len = len(all_posts)
+            for item in items:
+                post_obj = item.get("post") or {}
+                clean = canonicalize_url(
+                    post_obj.get("canonical_url") or post_obj.get("url") or ""
+                )
+                if not clean or clean in seen_urls:
+                    continue
+                seen_urls.add(clean)
+                all_posts.append(item)
+
+            next_cursor = data.get("nextCursor")
+            if not next_cursor or len(all_posts) == before_len or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return all_posts
+
+    def probe_api_get(self, url: str) -> Any:
+        """Fetch a raw Substack API URL with the saved session; no browser page.
+
+        Verification tool, complementing ``inspect-network`` (which discovers
+        unknown endpoints by watching a live browsing session): this queries a
+        URL already known, headlessly, for parity comparisons and endpoint
+        rediscovery checks (``cli.py``'s ``probe-api`` command).
+        """
+        return _run_playwright_sync(self._probe_api_get_impl, url=url)
+
+    def _probe_api_get_impl(self, url: str, playwright_instance: Any = None) -> Any:
+        self._ensure_authenticated()
+
+        def _do_fetch(p):
+            api_context = p.request.new_context(storage_state=str(self.state_path))
+            res = self._reader_api_get(api_context, url)
+            if res.status in (401, 403) or "sign-in" in res.url:
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
+            try:
+                return res.json()
+            except Exception:
+                text = None
+                try:
+                    text = res.text()
+                except Exception:
+                    pass
+                return {"_status": res.status, "_raw_text": text}
+
+        if playwright_instance is not None:
+            return _do_fetch(playwright_instance)
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise SubstackClientError("Playwright is not installed.") from None
+
+        with sync_playwright() as p:
+            return _do_fetch(p)
 
     def fetch_saved_notes_page(
         self, limit: int = 50, offset: int = 0
@@ -408,6 +620,7 @@ class SubstackSavedPostsClient:
         """
         from urllib.parse import quote
 
+        self._notes_api_truncated = False
         all_notes: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         cursor: str | None = None
@@ -425,12 +638,21 @@ class SubstackSavedPostsClient:
                     "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
                 )
             if not res.ok:
+                # Unavailable on the first page → signal fallback (raise, per
+                # the no-DOM-fallback rule); mid-stream → keep what we have,
+                # but flag it as truncated (see is_notes_fetch_truncated()) so
+                # a --force sync never mistakes "couldn't fetch the rest" for
+                # "the rest was unsaved".
+                if all_notes:
+                    self._notes_api_truncated = True
                 return all_notes if all_notes else None
 
             try:
                 data = res.json()
             except Exception as e:
                 logger.warning(f"JSON parsing error from saved-notes API: {e}.")
+                if all_notes:
+                    self._notes_api_truncated = True
                 return all_notes if all_notes else None
 
             items = data.get("items") or []

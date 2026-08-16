@@ -5,6 +5,17 @@ from pathlib import Path
 
 APP_NAME = "substack-saved-mcp"
 
+_SAVED_POSTS_SOURCES = frozenset({"auto", "legacy", "unified", "dom"})
+
+
+def get_saved_posts_source() -> str:
+    """Return which saved-posts fetch source to use: 'auto' (default, tries legacy
+    then the newer unified reader API then DOM), or a forced 'legacy'/'unified'/'dom'
+    for testing and rollback. Falls back to 'auto' on an unrecognized value rather
+    than raising, since a typo here shouldn't break every sync."""
+    value = (os.getenv("SUBSTACK_SAVED_POSTS_SOURCE") or "auto").strip().lower()
+    return value if value in _SAVED_POSTS_SOURCES else "auto"
+
 
 def get_default_data_dir() -> Path:
     """Return OS-appropriate application data directory."""

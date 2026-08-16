@@ -133,8 +133,14 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
     )
 
     # Dates. Leave saved_at unknown (None) rather than stamping the sync moment.
+    # Checked at both levels: the legacy reader-posts API puts it on the item
+    # itself, the unified reader/saved API nests it under "post" instead.
     published_at = post_obj.get("post_date") or post_obj.get("published_at")
-    saved_at = raw_data.get("created_at") or raw_data.get("saved_at")
+    saved_at = (
+        raw_data.get("created_at")
+        or raw_data.get("saved_at")
+        or post_obj.get("saved_at")
+    )
 
     excerpt = (
         post_obj.get("description")
@@ -247,31 +253,58 @@ def sync_saved_posts(
 
             offset += page_size
 
+        # A persistent failure mid-pagination (e.g. a 429 surviving every retry)
+        # makes a fetcher return whatever it had collected so far rather than
+        # signaling failure outright, so that partial progress isn't thrown
+        # away entirely. But that same partial list must never drive
+        # reconciliation: a post absent from it only because the fetch was cut
+        # short would look identical to one genuinely unsaved on Substack, and
+        # reconcile_unsaved_posts() would wrongly soft-delete it.
+        fetch_truncated = active_client.is_posts_fetch_truncated()
         reconciled_count = 0
         if force:
-            reconciled_count = reconcile_unsaved_posts(remote_urls, db_path=db_path)
-            if reconciled_count:
-                logger.info(
-                    f"Reconciliation: soft-deleted {reconciled_count} post(s) no longer in the remote saved list."
+            if fetch_truncated:
+                logger.warning(
+                    "Force sync's fetch was truncated by a persistent failure "
+                    "mid-pagination; skipping reconciliation this run so posts "
+                    "that merely couldn't be fetched aren't soft-deleted as if "
+                    "they were unsaved remotely."
                 )
+            else:
+                reconciled_count = reconcile_unsaved_posts(remote_urls, db_path=db_path)
+                if reconciled_count:
+                    logger.info(
+                        f"Reconciliation: soft-deleted {reconciled_count} post(s) no longer in the remote saved list."
+                    )
 
+        status = "partial" if fetch_truncated else "success"
+        error_message = (
+            "Fetch was truncated by a persistent failure mid-pagination "
+            "(e.g. a 429 that survived every retry); some saved posts may be "
+            "missing from this sync, and reconciliation was skipped if this "
+            "was a --force sync."
+            if fetch_truncated
+            else None
+        )
         finish_sync_run(
             sync_id=sync_id,
-            status="success",
+            status=status,
             fetched_count=total_fetched,
             upserted_count=total_upserted,
             reconciled_count=reconciled_count,
+            error_message=error_message,
             db_path=db_path,
         )
         return _build_sync_run(
             sync_id,
-            "success",
+            status,
             sync_mode,
             "post",
             started_at,
             total_fetched,
             total_upserted,
             reconciled_count=reconciled_count,
+            error_message=error_message,
         )
 
     except AuthRequiredError as e:
@@ -476,31 +509,56 @@ def sync_saved_notes(
 
             offset += page_size
 
+        # See the mirror comment in sync_saved_posts(): a persistent failure
+        # mid-pagination can leave the fetcher's cached list truncated, and
+        # that partial list must never drive reconciliation.
+        fetch_truncated = active_client.is_notes_fetch_truncated()
         reconciled_count = 0
         if force:
-            reconciled_count = reconcile_unsaved_notes(remote_note_ids, db_path=db_path)
-            if reconciled_count:
-                logger.info(
-                    f"Reconciliation: soft-deleted {reconciled_count} note(s) no longer in the remote saved list."
+            if fetch_truncated:
+                logger.warning(
+                    "Force sync's fetch was truncated by a persistent failure "
+                    "mid-pagination; skipping reconciliation this run so notes "
+                    "that merely couldn't be fetched aren't soft-deleted as if "
+                    "they were unsaved remotely."
                 )
+            else:
+                reconciled_count = reconcile_unsaved_notes(
+                    remote_note_ids, db_path=db_path
+                )
+                if reconciled_count:
+                    logger.info(
+                        f"Reconciliation: soft-deleted {reconciled_count} note(s) no longer in the remote saved list."
+                    )
 
+        status = "partial" if fetch_truncated else "success"
+        error_message = (
+            "Fetch was truncated by a persistent failure mid-pagination "
+            "(e.g. a 429 that survived every retry); some saved notes may be "
+            "missing from this sync, and reconciliation was skipped if this "
+            "was a --force sync."
+            if fetch_truncated
+            else None
+        )
         finish_sync_run(
             sync_id=sync_id,
-            status="success",
+            status=status,
             fetched_count=total_fetched,
             upserted_count=total_upserted,
             reconciled_count=reconciled_count,
+            error_message=error_message,
             db_path=db_path,
         )
         return _build_sync_run(
             sync_id,
-            "success",
+            status,
             sync_mode,
             "note",
             started_at,
             total_fetched,
             total_upserted,
             reconciled_count=reconciled_count,
+            error_message=error_message,
         )
 
     except AuthRequiredError as e:

@@ -1,8 +1,11 @@
 """Command Line Interface (CLI) for Substack Saved Posts MCP & Sync tool."""
 
+import itertools
 import json
+import logging
 import re
 import sys
+import time
 from datetime import UTC, datetime
 
 import click
@@ -52,6 +55,9 @@ from substack_saved_mcp.substack_client import (
 )
 from substack_saved_mcp.sync import sync_saved_notes as run_sync_notes
 from substack_saved_mcp.sync import sync_saved_posts as run_sync
+from substack_saved_mcp.url_utils import canonicalize_url
+
+logger = logging.getLogger(__name__)
 
 
 @click.group()
@@ -98,12 +104,14 @@ def sync(force: bool, only: str | None) -> None:
     if only in (None, "posts"):
         click.echo("Starting Substack saved posts sync...")
         result = run_sync(force=force)
-        if result.status == "success":
+        if result.status in ("success", "partial"):
             posts_ok = True
             msg = f"Sync complete! Fetched {result.fetched_count} posts, upserted {result.upserted_count} posts."
             if result.reconciled_count:
                 msg += f" Unsaved {result.reconciled_count} post(s) no longer on Substack's saved list."
-            click.secho(msg, fg="green")
+            click.secho(msg, fg="green" if result.status == "success" else "yellow")
+            if result.status == "partial":
+                click.secho(f"Warning: {result.error_message}", fg="yellow")
         elif result.status == "auth_required":
             click.secho(f"Authentication required: {result.error_message}", fg="yellow")
         else:
@@ -112,12 +120,16 @@ def sync(force: bool, only: str | None) -> None:
     if only in (None, "notes"):
         click.echo("Starting Substack saved notes sync...")
         note_result = run_sync_notes(force=force)
-        if note_result.status == "success":
+        if note_result.status in ("success", "partial"):
             notes_ok = True
             msg = f"Sync complete! Fetched {note_result.fetched_count} notes, upserted {note_result.upserted_count} notes."
             if note_result.reconciled_count:
                 msg += f" Unsaved {note_result.reconciled_count} note(s) no longer on Substack's saved list."
-            click.secho(msg, fg="green")
+            click.secho(
+                msg, fg="green" if note_result.status == "success" else "yellow"
+            )
+            if note_result.status == "partial":
+                click.secho(f"Warning: {note_result.error_message}", fg="yellow")
         elif note_result.status == "auth_required":
             click.secho(
                 f"Authentication required: {note_result.error_message}", fg="yellow"
@@ -748,38 +760,56 @@ def inspect_network(
         context = browser.new_context(storage_state=storage_state)
         page = context.new_page()
 
-        def handle_response(response):
-            if response.url.lower().split("?")[0].endswith(_INSPECT_ASSET_SUFFIXES):
-                return
-            if not pattern.search(response.url):
+        def handle_route(route):
+            request = route.request
+            req_url = request.url
+            if req_url.lower().split("?")[0].endswith(
+                _INSPECT_ASSET_SUFFIXES
+            ) or not pattern.search(req_url):
+                route.continue_()
                 return
 
-            request_body = response.request.post_data
+            # A sync-API page.on("response") handler can deadlock calling
+            # response.text() on the same driver thread that produced it. Routing
+            # the request through route.fetch() reads the body safely outside that
+            # handler, and route.fulfill() re-serves the exact response to the page
+            # so navigation/rendering behaves identically to an unrouted request.
+            try:
+                response = route.fetch()
+            except Exception as e:
+                logger.warning(f"Could not fetch intercepted request {req_url}: {e}")
+                route.continue_()
+                return
+
+            request_body = request.post_data
+            content_type = response.headers.get("content-type") or ""
             response_body = None
-            if max_body:
-                content_type = response.headers.get("content-type") or ""
-                if "json" in content_type:
-                    try:
-                        response_body = response.text()[:max_body]
-                    except Exception:
-                        response_body = None
+            body_read_failed = False
+            if max_body and "json" in content_type:
+                try:
+                    response_body = response.text()[:max_body]
+                except Exception as e:
+                    body_read_failed = True
+                    logger.warning(f"Could not read response body for {req_url}: {e}")
 
             click.echo(
-                f"[Network Intercept] {response.request.method} {response.url} "
+                f"[Network Intercept] {request.method} {req_url} "
                 f"(Status: {response.status})"
             )
             if request_body:
                 click.echo(f"    Request Body : {request_body}")
             if response_body:
                 click.echo(f"    Response Body: {response_body}")
+            elif body_read_failed:
+                click.secho("    Response Body: <could not be read>", fg="yellow")
 
             if out_file:
                 out_file.write(
                     json.dumps(
                         {
                             "ts": datetime.now(UTC).isoformat(),
-                            "method": response.request.method,
-                            "url": response.url,
+                            "method": request.method,
+                            "url": req_url,
                             "status": response.status,
                             "request_body": request_body,
                             "response_body": response_body,
@@ -789,7 +819,9 @@ def inspect_network(
                 )
                 out_file.flush()
 
-        page.on("response", handle_response)
+            route.fulfill(response=response)
+
+        context.route("**/*", handle_route)
         page.goto(url)
         click.echo(
             "Navigate around the page (try the Notes toggle, save/unsave, open an "
@@ -801,6 +833,193 @@ def inspect_network(
     if out_file:
         out_file.close()
         click.echo(f"Capture written to {out_path}")
+
+
+@cli.command(name="probe-api")
+@click.argument("url")
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False),
+    help="Write the raw JSON response to this file instead of stdout.",
+)
+def probe_api(url: str, out_path: str | None) -> None:
+    """Headlessly GET a Substack API URL with the saved session (no browser page).
+
+    Complements 'inspect-network' (which discovers unknown endpoints by watching
+    a live browsing session): use this to re-verify a URL already known, or to
+    inspect a specific reader-API response while assessing a migration.
+    """
+    client = SubstackSavedPostsClient()
+    try:
+        data = client.probe_api_get(url)
+    except AuthRequiredError as e:
+        click.secho(f"Authentication required: {e}", fg="yellow")
+        return
+    except Exception as e:
+        click.secho(f"Error probing {url}: {e}", fg="red")
+        return
+
+    text = json.dumps(data, indent=2)
+    if out_path:
+        with open(out_path, "w") as f:
+            f.write(text)
+        click.echo(f"Response written to {out_path}")
+    else:
+        click.echo(text)
+
+
+# Fields parse_remote_post() reads off a unified-endpoint post object, used by
+# compare-saved-apis to report per-field presence without printing post content.
+_UNIFIED_POST_FIELDS = (
+    "id",
+    "canonical_url",
+    "title",
+    "post_date",
+    "saved_at",
+    "audience",
+    "description",
+    "subtitle",
+    "cover_image",
+    "wordcount",
+    "word_count",
+    "words",
+)
+
+
+@cli.command(name="compare-saved-apis")
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False),
+    help=(
+        "Write the full report (including mismatched canonical URLs) as JSON to "
+        "this file. Without it, only aggregate counts/percentages are printed — "
+        "no post URLs or content."
+    ),
+)
+def compare_saved_apis(out_path: str | None) -> None:
+    """Fetch the full saved-posts list from both the legacy and unified reader
+    APIs and report parity: counts, set differences, per-field presence on the
+    unified payload, and bookmark-timestamp/ordering — the evidence needed to
+    decide whether posts can migrate off the legacy reader-posts API.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        click.secho("Playwright not installed.", fg="red")
+        return
+
+    client = SubstackSavedPostsClient()
+    try:
+        client._ensure_authenticated()
+    except AuthRequiredError as e:
+        click.secho(f"Authentication required: {e}", fg="yellow")
+        return
+
+    with sync_playwright() as p:
+        api_context = p.request.new_context(storage_state=str(client.state_path))
+        try:
+            click.echo("Fetching via legacy reader-posts API...")
+            legacy_posts = client._fetch_all_saved_via_reader_api(api_context) or []
+
+            # This tool runs once, interactively, rather than in a background
+            # sync loop, so it can afford to be far more patient than the
+            # default sync retry policy: pause briefly before the second full
+            # paginated fetch (fetching legacy's full list can itself trigger
+            # rate limiting that would otherwise make the very next request
+            # 429 through all retries and be misread as "unified has no
+            # posts"), and retry the unified fetch harder (max_retries=6,
+            # exponential backoff up to ~30s per attempt) before giving up.
+            click.echo("Pausing briefly before the unified reader/saved API...")
+            time.sleep(5)
+            click.echo("Fetching via unified reader/saved API...")
+            unified_items = (
+                client._fetch_all_saved_posts_via_unified_api(
+                    api_context, max_retries=6
+                )
+                or []
+            )
+        except AuthRequiredError as e:
+            click.secho(f"Authentication required: {e}", fg="yellow")
+            return
+
+    legacy_urls = {
+        canonicalize_url(item.get("canonical_url") or "") for item in legacy_posts
+    }
+    legacy_urls.discard("")
+    unified_posts = [item.get("post") or {} for item in unified_items]
+    unified_urls = {
+        canonicalize_url(post.get("canonical_url") or post.get("url") or "")
+        for post in unified_posts
+    }
+    unified_urls.discard("")
+
+    missing_from_unified = legacy_urls - unified_urls
+    missing_from_legacy = unified_urls - legacy_urls
+
+    n_unified = len(unified_posts) or 1
+    field_presence = {
+        field: sum(1 for post in unified_posts if post.get(field))
+        for field in _UNIFIED_POST_FIELDS
+    }
+
+    saved_ats = [post.get("saved_at") for post in unified_posts if post.get("saved_at")]
+    ordered = all(a >= b for a, b in itertools.pairwise(saved_ats))
+
+    if legacy_posts and not unified_items:
+        click.echo("")
+        click.secho(
+            "Unified API returned 0 posts while legacy returned "
+            f"{len(legacy_posts)} — before reading this as 'the endpoint lacks "
+            "posts data', re-run compare-saved-apis on its own (not right "
+            "after another full sync/fetch): a 429 that survives every retry "
+            "reads identically to a genuinely empty/unavailable endpoint, and "
+            "the large legacy fetch just before it can trigger exactly that.",
+            fg="yellow",
+        )
+
+    click.echo("")
+    click.echo(f"Legacy reader-posts API : {len(legacy_posts)} posts")
+    click.echo(f"Unified reader/saved API: {len(unified_items)} posts")
+    click.echo(f"In both                : {len(legacy_urls & unified_urls)}")
+    click.echo(f"Only in legacy          : {len(missing_from_unified)}")
+    click.echo(f"Only in unified         : {len(missing_from_legacy)}")
+    click.echo("")
+    click.echo("Unified payload field presence:")
+    for field in _UNIFIED_POST_FIELDS:
+        pct = 100 * field_presence[field] / n_unified
+        click.echo(
+            f"  {field:<16} {field_presence[field]:>5}/{len(unified_posts):<5} ({pct:5.1f}%)"
+        )
+    click.echo("")
+    if saved_ats:
+        click.echo(
+            f"post.saved_at present on {len(saved_ats)}/{len(unified_posts)} items; "
+            f"{'monotonically newest-first' if ordered else 'NOT monotonically ordered'}."
+        )
+    else:
+        click.secho(
+            "No post.saved_at found anywhere in the unified payload — a real "
+            "bookmark timestamp for posts may be absent from this endpoint.",
+            fg="yellow",
+        )
+
+    if out_path:
+        report = {
+            "legacy_count": len(legacy_posts),
+            "unified_count": len(unified_items),
+            "overlap_count": len(legacy_urls & unified_urls),
+            "only_in_legacy": sorted(missing_from_unified),
+            "only_in_unified": sorted(missing_from_legacy),
+            "unified_field_presence": field_presence,
+            "unified_field_presence_denominator": len(unified_posts),
+            "saved_at_present_count": len(saved_ats),
+            "saved_at_ordered_newest_first": ordered if saved_ats else None,
+        }
+        with open(out_path, "w") as f:
+            json.dump(report, f, indent=2)
+        click.echo(f"\nFull report (including mismatched URLs) written to {out_path}")
 
 
 if __name__ == "__main__":
