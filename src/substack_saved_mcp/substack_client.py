@@ -1,17 +1,29 @@
 """Playwright client for Substack authentication, saved post extractions, and write operations."""
 
 import concurrent.futures
+import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from substack_saved_mcp.config import get_browser_dir, get_storage_state_path
-from substack_saved_mcp.models import SavedPost
+from substack_saved_mcp.content_utils import note_body_to_text
+from substack_saved_mcp.models import SavedNote, SavedPost
 from substack_saved_mcp.url_utils import canonicalize_url
 
 logger = logging.getLogger(__name__)
+
+# Matches a note permalink's Substack comment id, e.g.
+# https://substack.com/@handle/note/c-300984381 -> "300984381"
+_NOTE_URL_ID_PATTERN = re.compile(r"/note/c-(\d+)")
+
+
+def _extract_note_id(url: str) -> str | None:
+    match = _NOTE_URL_ID_PATTERN.search(url)
+    return match.group(1) if match else None
 
 
 def _run_playwright_sync(func, *args, **kwargs):
@@ -134,12 +146,20 @@ class SubstackSavedPostsClient:
         self._dom_cache: list[dict[str, Any]] | None = None
         self._api_cache: list[dict[str, Any]] | None = None
         self._api_failed: bool = False
+        self._notes_api_cache: list[dict[str, Any]] | None = None
+        self._notes_api_failed: bool = False
 
     def reset_cache(self) -> None:
-        """Reset cached posts extraction (reader API and DOM fallback)."""
+        """Reset cached posts and notes extraction (reader API and DOM fallback).
+
+        Notes and posts caches are kept separate so a sync of one entity can
+        never poison the other's mid-run cache.
+        """
         self._dom_cache = None
         self._api_cache = None
         self._api_failed = False
+        self._notes_api_cache = None
+        self._notes_api_failed = False
 
     def _ensure_authenticated(self) -> None:
         """Check if storage state exists."""
@@ -158,16 +178,11 @@ class SubstackSavedPostsClient:
         )
 
     def _fetch_saved_posts_page_impl(
-        self, limit: int = 50, offset: int = 0
+        self, limit: int = 50, offset: int = 0, playwright_instance: Any = None
     ) -> list[dict[str, Any]]:
         self._ensure_authenticated()
 
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise SubstackClientError("Playwright is not installed.") from None
-
-        with sync_playwright() as p:
+        def _do_fetch(p):
             # Prefer the reader inbox API: it returns the real bookmark timestamp
             # (saved_at) and an ISO publication date (post_date) per post. The full
             # saved list is fetched once via cursor pagination and cached, then sliced
@@ -188,6 +203,17 @@ class SubstackSavedPostsClient:
             return self._fetch_via_dom(
                 offset=offset, limit=limit, playwright_instance=p
             )
+
+        if playwright_instance is not None:
+            return _do_fetch(playwright_instance)
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise SubstackClientError("Playwright is not installed.") from None
+
+        with sync_playwright() as p:
+            return _do_fetch(p)
 
     @staticmethod
     def _retry_after_seconds(res: Any, attempt: int, cap: float = 30.0) -> float:
@@ -316,6 +342,115 @@ class SubstackSavedPostsClient:
             cursor = page_min_saved
 
         return all_posts
+
+    def fetch_saved_notes_page(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch a page of saved notes from Substack using Playwright's API request context."""
+        return _run_playwright_sync(
+            self._fetch_saved_notes_page_impl, limit=limit, offset=offset
+        )
+
+    def _fetch_saved_notes_page_impl(
+        self, limit: int = 50, offset: int = 0, playwright_instance: Any = None
+    ) -> list[dict[str, Any]]:
+        self._ensure_authenticated()
+
+        def _do_fetch(p):
+            if self._notes_api_cache is None and not self._notes_api_failed:
+                api_context = p.request.new_context(storage_state=str(self.state_path))
+                self._notes_api_cache = self._fetch_all_saved_notes_via_api(api_context)
+                if self._notes_api_cache is None:
+                    self._notes_api_failed = True
+
+            if self._notes_api_cache is not None:
+                return self._notes_api_cache[offset : offset + limit]
+
+            # Unlike posts, notes have no DOM fallback: the notes card markup is
+            # entirely uncaptured, and (since the note id is its identity) a DOM
+            # scrape could never reconcile. A loud failure beats silent junk rows.
+            raise SubstackClientError(
+                "Could not fetch saved notes from Substack's reader API. Run "
+                "'substack-saved-mcp inspect-network' while browsing "
+                "https://substack.com/saved with the Notes tab open so the "
+                "endpoint can be re-diagnosed."
+            )
+
+        if playwright_instance is not None:
+            return _do_fetch(playwright_instance)
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise SubstackClientError("Playwright is not installed.") from None
+
+        with sync_playwright() as p:
+            return _do_fetch(p)
+
+    def _fetch_all_saved_notes_via_api(
+        self,
+        api_context: Any,
+        max_notes: int = 2000,
+        max_retries: int = 3,
+        sleep_func=time.sleep,
+    ) -> list[dict[str, Any]] | None:
+        """Fetch the full saved-notes list via Substack's unified reader/saved endpoint.
+
+        Confirmed live: ``GET /api/v1/reader/saved?filter=notes`` returns
+        ``{"items": [...], "nextCursor": <opaque server-issued token> | null}``.
+        Unlike the posts reader API there is no controllable page size and no
+        explicit bookmark timestamp per item — pagination is driven purely by
+        re-submitting the server's own ``nextCursor`` value (an opaque base64
+        JSON blob), not by an ``after=<ISO timestamp>`` cursor as posts uses,
+        so this is a standalone paginator rather than a shared abstraction with
+        ``_fetch_all_saved_via_reader_api``. Returns ``None`` if the endpoint is
+        unavailable on the first page so the caller can raise a clear error.
+        """
+        from urllib.parse import quote
+
+        all_notes: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        cursor: str | None = None
+
+        while len(all_notes) < max_notes:
+            url = "https://substack.com/api/v1/reader/saved?filter=notes"
+            if cursor:
+                url += f"&cursor={quote(cursor)}"
+
+            res = self._reader_api_get(
+                api_context, url, max_retries=max_retries, sleep_func=sleep_func
+            )
+            if res.status in (401, 403) or "sign-in" in res.url:
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
+            if not res.ok:
+                return all_notes if all_notes else None
+
+            try:
+                data = res.json()
+            except Exception as e:
+                logger.warning(f"JSON parsing error from saved-notes API: {e}.")
+                return all_notes if all_notes else None
+
+            items = data.get("items") or []
+            if not items:
+                break
+
+            before_len = len(all_notes)
+            for item in items:
+                note_id = (item.get("comment") or {}).get("id")
+                if note_id is None or str(note_id) in seen_ids:
+                    continue
+                seen_ids.add(str(note_id))
+                all_notes.append(item)
+
+            next_cursor = data.get("nextCursor")
+            if not next_cursor or len(all_notes) == before_len or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return all_notes
 
     def _fetch_via_dom(
         self, offset: int = 0, limit: int = 20, playwright_instance: Any = None
@@ -716,3 +851,172 @@ class SubstackSavedPostsClient:
 
         with sync_playwright() as p:
             return _do_unsave(p)
+
+    def save_note(self, url: str) -> tuple[SavedNote, str]:
+        """Save/bookmark a Substack note by URL.
+
+        Unlike posts, a note's numeric id is parseable straight out of its
+        permalink (``.../note/c-<id>``), and both the bookmark and read
+        endpoints are plain authenticated API calls — no browser page
+        navigation or ``window._preloads`` needed at all.
+        """
+        return _run_playwright_sync(self._save_note_impl, url=url)
+
+    def _save_note_impl(
+        self, url: str, playwright_instance: Any = None
+    ) -> tuple[SavedNote, str]:
+        self._ensure_authenticated()
+        clean_url = canonicalize_url(url)
+        note_id = _extract_note_id(clean_url)
+        if not note_id:
+            raise SubstackClientError(
+                f"Could not extract a note id from '{url}'. Expected a permalink "
+                "shaped like https://substack.com/@handle/note/c-<id>."
+            )
+
+        def _do_save(p):
+            api_context = p.request.new_context(storage_state=str(self.state_path))
+            response = api_context.post(
+                f"https://substack.com/api/v1/note/c-{note_id}/save"
+            )
+            confirmation = (
+                "confirmed" if getattr(response, "ok", False) else "unconfirmed"
+            )
+
+            comment: dict[str, Any] = {}
+            try:
+                content_res = api_context.get(
+                    f"https://substack.com/api/v1/reader/comment/{note_id}"
+                )
+                if getattr(content_res, "ok", False):
+                    comment = (content_res.json().get("item") or {}).get(
+                        "comment"
+                    ) or {}
+            except Exception:
+                pass
+
+            body_json = comment.get("body_json")
+            body_text, body_format = note_body_to_text(
+                body_json or comment.get("body") or ""
+            )
+            note = SavedNote(
+                substack_note_id=note_id,
+                url=clean_url,
+                body_text=body_text,
+                body_raw=json.dumps(body_json) if body_json else comment.get("body"),
+                body_format=body_format,
+                author_name=comment.get("name"),
+                author_handle=comment.get("handle"),
+                author_id=(
+                    str(comment.get("user_id")) if comment.get("user_id") else None
+                ),
+                posted_at=comment.get("date"),
+                is_saved=1,
+            )
+            return note, confirmation
+
+        if playwright_instance is not None:
+            return _do_save(playwright_instance)
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            return _do_save(p)
+
+    def unsave_note(self, url: str, note_id: str | None = None) -> str:
+        """Unsave/unbookmark a Substack note; returns a confirmation status.
+
+        Notes are API-only, with no DOM-click fallback: the note-page button
+        selector Substack uses is uncaptured, and `_click_bookmark_toggle`
+        targets a *post* page's markup — pointing it at a note page would be
+        exactly the kind of unverified guesswork this codebase avoids (see
+        CLAUDE.md on save_post/unsave_post's original discovery process).
+        """
+        return _run_playwright_sync(self._unsave_note_impl, url=url, note_id=note_id)
+
+    def _unsave_note_impl(
+        self,
+        url: str,
+        note_id: str | None = None,
+        playwright_instance: Any = None,
+    ) -> str:
+        self._ensure_authenticated()
+        resolved_id = note_id or _extract_note_id(url)
+        if not resolved_id:
+            return "not_found"
+
+        def _do_unsave(p):
+            try:
+                api_context = p.request.new_context(storage_state=str(self.state_path))
+                response = api_context.delete(
+                    f"https://substack.com/api/v1/note/c-{resolved_id}/save"
+                )
+                if getattr(response, "ok", False):
+                    return "confirmed"
+            except Exception:
+                pass
+            return "unconfirmed"
+
+        if playwright_instance is not None:
+            return _do_unsave(playwright_instance)
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            return _do_unsave(p)
+
+    def fetch_note_content(self, url: str) -> dict[str, Any]:
+        """Fetch a saved note's full content directly, without a browser page.
+
+        Uses the same ``GET /api/v1/reader/comment/{id}`` endpoint the notes
+        list relies on for enrichment — there is no need for a note-page
+        navigation or ``window._preloads`` lookup as posts require.
+        """
+        return _run_playwright_sync(self._fetch_note_content_impl, url=url)
+
+    def _fetch_note_content_impl(
+        self, url: str, playwright_instance: Any = None
+    ) -> dict[str, Any]:
+        self._ensure_authenticated()
+        note_id = _extract_note_id(url)
+        if not note_id:
+            raise SubstackClientError(
+                f"Could not extract a note id from '{url}'. Expected a permalink "
+                "shaped like https://substack.com/@handle/note/c-<id>."
+            )
+
+        def _do_fetch(p):
+            api_context = p.request.new_context(storage_state=str(self.state_path))
+            response = api_context.get(
+                f"https://substack.com/api/v1/reader/comment/{note_id}"
+            )
+            if response.status in (401, 403) or "sign-in" in response.url:
+                raise AuthRequiredError(
+                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                )
+            if not getattr(response, "ok", False):
+                return {
+                    "body_raw": None,
+                    "body_format": None,
+                    "body_text": None,
+                    "author_name": None,
+                    "posted_at": None,
+                }
+
+            comment = (response.json().get("item") or {}).get("comment") or {}
+            body_json = comment.get("body_json")
+            body_text, body_format = note_body_to_text(
+                body_json or comment.get("body") or ""
+            )
+            return {
+                "body_raw": json.dumps(body_json) if body_json else comment.get("body"),
+                "body_format": body_format,
+                "body_text": body_text,
+                "author_name": comment.get("name"),
+                "posted_at": comment.get("date"),
+            }
+
+        if playwright_instance is not None:
+            return _do_fetch(playwright_instance)
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            return _do_fetch(p)

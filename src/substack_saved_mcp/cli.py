@@ -1,25 +1,45 @@
 """Command Line Interface (CLI) for Substack Saved Posts MCP & Sync tool."""
 
+import json
+import re
 import sys
+from datetime import UTC, datetime
 
 import click
 
-from substack_saved_mcp.content_utils import format_post_for_llm, html_to_llm_text
+from substack_saved_mcp.config import get_storage_state_path
+from substack_saved_mcp.content_utils import (
+    format_note_for_llm,
+    format_post_for_llm,
+    html_to_llm_text,
+)
 from substack_saved_mcp.database import (
+    get_note,
     get_post,
     get_status,
     init_db,
+    soft_delete_note,
     soft_delete_post,
+    upsert_note,
     upsert_post,
 )
 from substack_saved_mcp.database import (
     list_audiences as db_list_audiences,
 )
 from substack_saved_mcp.database import (
+    list_note_authors as db_list_note_authors,
+)
+from substack_saved_mcp.database import (
+    list_notes as db_list_notes,
+)
+from substack_saved_mcp.database import (
     list_posts as db_list_posts,
 )
 from substack_saved_mcp.database import (
     list_publications as db_list_publications,
+)
+from substack_saved_mcp.database import (
+    search_notes as db_search_notes,
 )
 from substack_saved_mcp.database import (
     search_posts as db_search_posts,
@@ -30,6 +50,7 @@ from substack_saved_mcp.substack_client import (
     SubstackSavedPostsClient,
     perform_interactive_login,
 )
+from substack_saved_mcp.sync import sync_saved_notes as run_sync_notes
 from substack_saved_mcp.sync import sync_saved_posts as run_sync
 
 
@@ -64,20 +85,48 @@ def login() -> None:
 @click.option(
     "--force", is_flag=True, help="Force full resync instead of incremental stop."
 )
-def sync(force: bool) -> None:
-    """Sync saved posts from Substack account into local SQLite cache."""
-    click.echo("Starting Substack saved posts sync...")
-    result = run_sync(force=force)
+@click.option(
+    "--only",
+    type=click.Choice(["posts", "notes"]),
+    help="Sync only one entity instead of both.",
+)
+def sync(force: bool, only: str | None) -> None:
+    """Sync saved posts and notes from Substack account into local SQLite cache."""
+    posts_ok = only == "notes"
+    notes_ok = only == "posts"
 
-    if result.status == "success":
-        msg = f"Sync complete! Fetched {result.fetched_count} posts, upserted {result.upserted_count} posts."
-        if result.reconciled_count:
-            msg += f" Unsaved {result.reconciled_count} post(s) no longer on Substack's saved list."
-        click.secho(msg, fg="green")
-    elif result.status == "auth_required":
-        click.secho(f"Authentication required: {result.error_message}", fg="yellow")
-    else:
-        click.secho(f"Sync failed: {result.error_message}", fg="red")
+    if only in (None, "posts"):
+        click.echo("Starting Substack saved posts sync...")
+        result = run_sync(force=force)
+        if result.status == "success":
+            posts_ok = True
+            msg = f"Sync complete! Fetched {result.fetched_count} posts, upserted {result.upserted_count} posts."
+            if result.reconciled_count:
+                msg += f" Unsaved {result.reconciled_count} post(s) no longer on Substack's saved list."
+            click.secho(msg, fg="green")
+        elif result.status == "auth_required":
+            click.secho(f"Authentication required: {result.error_message}", fg="yellow")
+        else:
+            click.secho(f"Sync failed: {result.error_message}", fg="red")
+
+    if only in (None, "notes"):
+        click.echo("Starting Substack saved notes sync...")
+        note_result = run_sync_notes(force=force)
+        if note_result.status == "success":
+            notes_ok = True
+            msg = f"Sync complete! Fetched {note_result.fetched_count} notes, upserted {note_result.upserted_count} notes."
+            if note_result.reconciled_count:
+                msg += f" Unsaved {note_result.reconciled_count} note(s) no longer on Substack's saved list."
+            click.secho(msg, fg="green")
+        elif note_result.status == "auth_required":
+            click.secho(
+                f"Authentication required: {note_result.error_message}", fg="yellow"
+            )
+        else:
+            click.secho(f"Sync failed: {note_result.error_message}", fg="red")
+
+    if not (posts_ok or notes_ok):
+        sys.exit(1)
 
 
 @cli.command()
@@ -138,6 +187,65 @@ def unsave(url_or_id: str) -> None:
     if updated:
         click.secho(
             f"Successfully unsaved '{post.title}' from local cache.", fg="green"
+        )
+        if confirmation != "confirmed":
+            click.secho(
+                f"Warning: could not confirm the bookmark was removed on Substack's own page (status: {confirmation}).",
+                fg="yellow",
+            )
+
+
+@cli.command(name="save-note")
+@click.argument("url")
+def save_note(url: str) -> None:
+    """Save/bookmark a Substack note by URL."""
+    init_db()
+    click.echo(f"Saving note: {url}...")
+    client = SubstackSavedPostsClient()
+    try:
+        note, confirmation = client.save_note(url)
+        saved_db_note = upsert_note(note)
+        click.secho(
+            f"Successfully saved note by @{saved_db_note.author_handle} to local cache!",
+            fg="green",
+        )
+        click.echo(f"Posted at: {saved_db_note.posted_at or 'N/A'}")
+        if confirmation != "confirmed":
+            click.secho(
+                f"Warning: could not confirm the bookmark was saved on Substack's own page "
+                f"(status: {confirmation}). Cached locally regardless; a future 'sync --force' "
+                "will correct it if the remote save didn't actually happen.",
+                fg="yellow",
+            )
+    except AuthRequiredError as e:
+        click.secho(f"Authentication required: {e}", fg="yellow")
+    except Exception as e:
+        click.secho(f"Error saving note: {e}", fg="red")
+
+
+@cli.command(name="unsave-note")
+@click.argument("url_or_id")
+def unsave_note(url_or_id: str) -> None:
+    """Unsave/unbookmark a Substack note by URL or local ID."""
+    init_db()
+    note = get_note(url_or_id)
+    if not note:
+        click.secho(f"Note '{url_or_id}' not found in local cache.", fg="yellow")
+        return
+
+    click.echo(f"Unsaving note by @{note.author_handle}...")
+    client = SubstackSavedPostsClient()
+    confirmation = "unconfirmed"
+    try:
+        confirmation = client.unsave_note(note.url or "", note_id=note.substack_note_id)
+    except Exception as e:
+        click.echo(f"Remote unsave notice: {e}")
+
+    updated = soft_delete_note(note.id) if note.id is not None else None
+    if updated:
+        click.secho(
+            f"Successfully unsaved note by @{note.author_handle} from local cache.",
+            fg="green",
         )
         if confirmation != "confirmed":
             click.secho(
@@ -286,6 +394,109 @@ def audiences() -> None:
         )
 
 
+@cli.command(name="search-notes")
+@click.argument("query")
+@click.option("--author", help="Filter by author name or handle.")
+@click.option("--posted-after", help="Only notes posted on/after this ISO-8601 date.")
+@click.option("--posted-before", help="Only notes posted on/before this ISO-8601 date.")
+@click.option(
+    "--saved-after", help="Only notes bookmarked on/after this ISO-8601 date."
+)
+@click.option(
+    "--saved-before", help="Only notes bookmarked on/before this ISO-8601 date."
+)
+@click.option("--limit", default=10, help="Maximum search results.")
+def search_notes(
+    query: str,
+    author: str | None,
+    posted_after: str | None,
+    posted_before: str | None,
+    saved_after: str | None,
+    saved_before: str | None,
+    limit: int,
+) -> None:
+    """Perform full-text search across cached saved notes."""
+    init_db()
+    results = db_search_notes(
+        query=query,
+        author=author,
+        posted_after=posted_after,
+        posted_before=posted_before,
+        saved_after=saved_after,
+        saved_before=saved_before,
+        limit=limit,
+    )
+    if not results:
+        click.echo(f"No saved notes matched query '{query}'.")
+        return
+
+    click.echo(f"Found {len(results)} matching note(s):\n")
+    for idx, n in enumerate(results, 1):
+        click.secho(f"{idx}. @{n.author_handle or 'unknown'}", fg="cyan", bold=True)
+        click.echo(f"   Author  : {n.author_name or 'N/A'}")
+        click.echo(f"   Posted  : {n.posted_at or 'N/A'}")
+        if n.is_restack and n.restacked_post_title:
+            click.echo(f"   Restack : {n.restacked_post_title}")
+        click.echo(f"   Body    : {n.body_preview[:120]}...")
+        if n.url:
+            click.echo(f"   URL     : {n.url}")
+        click.echo("")
+
+
+@cli.command(name="list-notes")
+@click.option("--limit", default=10, help="Number of notes to display.")
+@click.option("--offset", default=0, help="Pagination offset.")
+@click.option("--author", help="Filter by author name or handle.")
+@click.option("--restacks-only", is_flag=True, help="Show only restacked notes.")
+@click.option(
+    "--sort-by", type=click.Choice(["saved_at", "posted_at"]), default="saved_at"
+)
+def list_notes(
+    limit: int, offset: int, author: str | None, restacks_only: bool, sort_by: str
+) -> None:
+    """List saved notes ordered by saved date or posted date."""
+    init_db()
+    notes = db_list_notes(
+        limit=limit,
+        offset=offset,
+        author=author,
+        is_restack=True if restacks_only else None,
+        sort_by=sort_by,
+    )
+    if not notes:
+        click.echo("No saved notes found.")
+        return
+
+    click.echo(f"Saved Notes ({len(notes)} displayed):\n")
+    for idx, n in enumerate(notes, offset + 1):
+        restack = f" | Restack: {n.restacked_post_title}" if n.is_restack else ""
+        click.secho(f"{idx}. @{n.author_handle or 'unknown'}", fg="cyan")
+        click.echo(
+            f"   Posted: {n.posted_at or 'N/A'} | Saved: {n.saved_at or 'N/A'}{restack}"
+        )
+        click.echo(f"   {n.body_preview[:120]}")
+        if n.url:
+            click.echo(f"   URL: {n.url}")
+        click.echo("")
+
+
+@cli.command(name="note-authors")
+def note_authors() -> None:
+    """List all note authors present in the cache."""
+    init_db()
+    authors = db_list_note_authors()
+    if not authors:
+        click.echo("No notes in cache.")
+        return
+
+    click.echo(f"Cached Note Authors ({len(authors)} total):\n")
+    for a in authors:
+        click.echo(
+            f"- @{a.author_handle or 'unknown'} ({a.author_name or 'N/A'}): "
+            f"{a.note_count} saved note{'s' if a.note_count != 1 else ''}"
+        )
+
+
 @cli.command()
 def status() -> None:
     """Show cache statistics and last sync run info."""
@@ -297,6 +508,10 @@ def status() -> None:
     click.echo(f"Total Publications  : {st.total_publications}")
     click.echo(f"Last Successful Sync: {st.last_successful_sync or 'Never'}")
     click.echo(f"Last Sync Status    : {st.last_sync_status or 'N/A'}")
+    click.echo(f"Active Saved Notes  : {st.total_saved_notes}")
+    click.echo(f"Unsaved Notes       : {st.total_unsaved_notes}")
+    click.echo(f"Last Successful Note Sync: {st.last_successful_note_sync or 'Never'}")
+    click.echo(f"Last Note Sync Status    : {st.last_note_sync_status or 'N/A'}")
 
 
 @cli.command(name="get-content")
@@ -372,9 +587,140 @@ def get_content(url_or_id: str, no_cache: bool) -> None:
     )
 
 
-@cli.command()
-def inspect_network() -> None:
-    """Inspect and capture Substack saved posts network endpoints structure safely."""
+@cli.command(name="get-note")
+@click.argument("url_or_id")
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Don't store the fetched content in the local cache.",
+)
+def get_note_content(url_or_id: str, no_cache: bool) -> None:
+    """Fetch a saved note's full content and print it formatted for an LLM.
+
+    Uses the cached body_text if a previous fetch already populated it;
+    otherwise fetches the note directly via Substack's reader API and caches
+    the result unless --no-cache is given.
+    """
+    init_db()
+    note = get_note(url_or_id)
+    if not note:
+        click.secho(f"Note '{url_or_id}' not found in local cache.", fg="yellow")
+        return
+
+    if note.body_text:
+        click.echo(
+            format_note_for_llm(
+                author_name=note.author_name,
+                author_handle=note.author_handle,
+                url=note.url,
+                body_text=note.body_text,
+                posted_at=note.posted_at,
+                restacked_post_title=note.restacked_post_title,
+                restacked_post_url=note.restacked_post_url,
+            )
+        )
+        return
+
+    if not note.url:
+        click.secho(
+            f"Note '{url_or_id}' has no known permalink; cannot fetch its content.",
+            fg="yellow",
+        )
+        return
+
+    click.echo(f"Fetching full content for note by @{note.author_handle}...", err=True)
+    client = SubstackSavedPostsClient()
+    try:
+        result = client.fetch_note_content(note.url)
+    except AuthRequiredError as e:
+        click.secho(f"Authentication required: {e}", fg="yellow")
+        return
+    except Exception as e:
+        click.secho(f"Error fetching content: {e}", fg="red")
+        return
+
+    body_text = result.get("body_text")
+    if not body_text:
+        click.secho(
+            "Could not find this note's content via Substack's reader API. Run "
+            "'substack-saved-mcp inspect-network' while opening this note "
+            f"({note.url}) in the browser so we can capture the real content "
+            "source, then this command can be updated.",
+            fg="yellow",
+        )
+        return
+
+    if not no_cache:
+        note.body_text = body_text
+        note.body_raw = result.get("body_raw")
+        note.body_format = result.get("body_format")
+        note = upsert_note(note)
+
+    click.echo(
+        format_note_for_llm(
+            author_name=note.author_name,
+            author_handle=note.author_handle,
+            url=note.url,
+            body_text=body_text,
+            posted_at=note.posted_at,
+            restacked_post_title=note.restacked_post_title,
+            restacked_post_url=note.restacked_post_url,
+        )
+    )
+
+
+_INSPECT_URL_PATTERN = (
+    r"api/v1|api/v2|bookmark|saved|notes?|comment|reader|feed|restack"
+)
+_INSPECT_ASSET_SUFFIXES = (
+    ".js",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".woff",
+    ".woff2",
+    ".ico",
+)
+
+
+@cli.command(name="inspect-network")
+@click.option(
+    "--authenticated/--anonymous",
+    default=True,
+    help=(
+        "Reuse the saved login session (storage_state.json) so the target page "
+        "renders as your logged-in account. Use --anonymous to browse without it."
+    ),
+)
+@click.option(
+    "--url",
+    default="https://substack.com/saved",
+    help="Page to open in the inspector (e.g. an individual note/post URL).",
+)
+@click.option(
+    "--filter",
+    "url_filter",
+    default=_INSPECT_URL_PATTERN,
+    help="Regex matched (case-insensitively) against response URLs to decide what to log.",
+)
+@click.option(
+    "--max-body",
+    default=4000,
+    help="Max characters of each JSON response body to print (0 disables body logging).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False),
+    help="Append each intercepted exchange as a JSON line to this file.",
+)
+def inspect_network(
+    authenticated: bool, url: str, url_filter: str, max_body: int, out_path: str | None
+) -> None:
+    """Inspect and capture Substack network traffic (posts, notes, bookmarks) safely."""
     click.echo("Launching Playwright inspector context...")
     try:
         from playwright.sync_api import sync_playwright
@@ -382,31 +728,79 @@ def inspect_network() -> None:
         click.secho("Playwright not installed.", fg="red")
         return
 
+    storage_state = None
+    if authenticated:
+        state_path = get_storage_state_path()
+        if state_path.exists():
+            storage_state = str(state_path)
+        else:
+            click.secho(
+                f"No saved session found at {state_path}; continuing anonymously. "
+                "Run 'substack-saved-mcp login' first to capture authenticated traffic.",
+                fg="yellow",
+            )
+
+    pattern = re.compile(url_filter, re.IGNORECASE)
+    out_file = open(out_path, "a") if out_path else None
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
+        context = browser.new_context(storage_state=storage_state)
         page = context.new_page()
 
         def handle_response(response):
-            if (
-                "api/v1" in response.url
-                or "bookmark" in response.url
-                or "saved" in response.url
-            ):
-                click.echo(
-                    f"[Network Intercept] {response.request.method} {response.url} (Status: {response.status})"
+            if response.url.lower().split("?")[0].endswith(_INSPECT_ASSET_SUFFIXES):
+                return
+            if not pattern.search(response.url):
+                return
+
+            request_body = response.request.post_data
+            response_body = None
+            if max_body:
+                content_type = response.headers.get("content-type") or ""
+                if "json" in content_type:
+                    try:
+                        response_body = response.text()[:max_body]
+                    except Exception:
+                        response_body = None
+
+            click.echo(
+                f"[Network Intercept] {response.request.method} {response.url} "
+                f"(Status: {response.status})"
+            )
+            if request_body:
+                click.echo(f"    Request Body : {request_body}")
+            if response_body:
+                click.echo(f"    Response Body: {response_body}")
+
+            if out_file:
+                out_file.write(
+                    json.dumps(
+                        {
+                            "ts": datetime.now(UTC).isoformat(),
+                            "method": response.request.method,
+                            "url": response.url,
+                            "status": response.status,
+                            "request_body": request_body,
+                            "response_body": response_body,
+                        }
+                    )
+                    + "\n"
                 )
-                post_data = response.request.post_data
-                if post_data:
-                    click.echo(f"    Body: {post_data}")
+                out_file.flush()
 
         page.on("response", handle_response)
-        page.goto("https://substack.com/saved")
+        page.goto(url)
         click.echo(
-            "Navigate around your saved posts page. Press ENTER in terminal when finished."
+            "Navigate around the page (try the Notes toggle, save/unsave, open an "
+            "individual post/note). Press ENTER in terminal when finished."
         )
         input("--> Press ENTER to finish network inspection: ")
         browser.close()
+
+    if out_file:
+        out_file.close()
+        click.echo(f"Capture written to {out_path}")
 
 
 if __name__ == "__main__":

@@ -1,19 +1,24 @@
-"""Sync engine for retrieving Substack saved posts into the local SQLite cache."""
+"""Sync engine for retrieving Substack saved posts and notes into the local SQLite cache."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from substack_saved_mcp.content_utils import note_body_to_text
 from substack_saved_mcp.database import (
     finish_sync_run,
+    get_note_by_substack_id,
     get_post,
     init_db,
+    reconcile_unsaved_notes,
     reconcile_unsaved_posts,
     start_sync_run,
+    upsert_note,
     upsert_post,
 )
-from substack_saved_mcp.models import SavedPost, SyncRun
+from substack_saved_mcp.models import SavedNote, SavedPost, SyncRun
 from substack_saved_mcp.substack_client import (
     AuthRequiredError,
     SubstackSavedPostsClient,
@@ -24,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 # Rough average adult reading speed used to derive reading time from word count.
 WORDS_PER_MINUTE = 200
+
+# Both sync loops stop early on this many consecutive already-synced items,
+# rather than re-walking the caller's entire saved history every incremental run.
+MAX_CONSECUTIVE_MATCHES = 3
 
 
 def _first_positive_int(source: dict[str, Any], *keys: str) -> int | None:
@@ -39,6 +48,47 @@ def _first_positive_int(source: dict[str, Any], *keys: str) -> int | None:
         if n > 0:
             return n
     return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    """Coerce a value to int, tolerating 0 (unlike _first_positive_int, which drops it)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_sync_run(
+    sync_id: int,
+    status: str,
+    sync_mode: str,
+    entity: str,
+    started_at: str,
+    fetched_count: int,
+    upserted_count: int,
+    reconciled_count: int = 0,
+    error_message: str | None = None,
+) -> SyncRun:
+    """Construct the SyncRun returned to callers, sharing one timestamp/field
+    assembly point instead of the three near-duplicate constructions each
+    sync function used to have. Takes the real ``started_at`` captured before
+    the fetch loop began, rather than stamping it at finish time (which
+    previously made started_at == completed_at regardless of how long the
+    sync actually took)."""
+    return SyncRun(
+        id=sync_id,
+        started_at=started_at,
+        completed_at=datetime.now(UTC).isoformat(),
+        status=status,
+        sync_mode=sync_mode,
+        entity=entity,
+        fetched_count=fetched_count,
+        upserted_count=upserted_count,
+        reconciled_count=reconciled_count,
+        error_message=error_message,
+    )
 
 
 def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
@@ -137,6 +187,7 @@ def sync_saved_posts(
     """Execute an incremental or full sync of Substack saved posts into SQLite cache."""
     init_db(db_path)
     sync_mode = "full" if force else "incremental"
+    started_at = datetime.now(UTC).isoformat()
     sync_id = start_sync_run(sync_mode=sync_mode, db_path=db_path)
 
     active_client = client or SubstackSavedPostsClient()
@@ -144,7 +195,6 @@ def sync_saved_posts(
     total_fetched = 0
     total_upserted = 0
     consecutive_matches = 0
-    MAX_CONSECUTIVE_MATCHES = 3
     # Only populated meaningfully for a force/full sync, which enumerates every
     # currently-saved remote post; an incremental sync may stop early and its
     # partial list must never be used to infer removals.
@@ -213,14 +263,14 @@ def sync_saved_posts(
             reconciled_count=reconciled_count,
             db_path=db_path,
         )
-        return SyncRun(
-            id=sync_id,
-            started_at=datetime.now(UTC).isoformat(),
-            completed_at=datetime.now(UTC).isoformat(),
-            status="success",
-            sync_mode=sync_mode,
-            fetched_count=total_fetched,
-            upserted_count=total_upserted,
+        return _build_sync_run(
+            sync_id,
+            "success",
+            sync_mode,
+            "post",
+            started_at,
+            total_fetched,
+            total_upserted,
             reconciled_count=reconciled_count,
         )
 
@@ -234,14 +284,14 @@ def sync_saved_posts(
             error_message=msg,
             db_path=db_path,
         )
-        return SyncRun(
-            id=sync_id,
-            started_at=datetime.now(UTC).isoformat(),
-            completed_at=datetime.now(UTC).isoformat(),
-            status="auth_required",
-            sync_mode=sync_mode,
-            fetched_count=total_fetched,
-            upserted_count=total_upserted,
+        return _build_sync_run(
+            sync_id,
+            "auth_required",
+            sync_mode,
+            "post",
+            started_at,
+            total_fetched,
+            total_upserted,
             error_message=msg,
         )
     except Exception as e:
@@ -255,13 +305,242 @@ def sync_saved_posts(
             error_message=msg,
             db_path=db_path,
         )
-        return SyncRun(
-            id=sync_id,
-            started_at=datetime.now(UTC).isoformat(),
-            completed_at=datetime.now(UTC).isoformat(),
-            status="failed",
-            sync_mode=sync_mode,
+        return _build_sync_run(
+            sync_id,
+            "failed",
+            sync_mode,
+            "post",
+            started_at,
+            total_fetched,
+            total_upserted,
+            error_message=msg,
+        )
+
+
+def parse_remote_note(raw_data: dict[str, Any]) -> SavedNote | None:
+    """Parse a raw saved-notes API item (or single-note-fetch wrapper) into a
+    typed SavedNote, or None if it carries no usable note id.
+
+    Confirmed against a live capture of Substack's ``/api/v1/reader/saved`` and
+    ``/api/v1/reader/comment/{id}`` endpoints (see CLAUDE.md). Notes carry no
+    bookmark timestamp anywhere in the payload — only a boolean ``is_saved`` —
+    so ``saved_at`` is always left None here, same as the CLAUDE.md rule of
+    never fabricating one from the sync moment.
+    """
+    wrapper: dict[str, Any] = raw_data
+    if "comment" not in raw_data:
+        wrapper = raw_data.get("item") or {}
+    comment = wrapper.get("comment") or {}
+
+    raw_id = comment.get("id")
+    if raw_id is None:
+        return None
+    substack_note_id = str(raw_id)
+
+    handle = comment.get("handle")
+    url = (
+        canonicalize_url(f"https://substack.com/@{handle}/note/c-{substack_note_id}")
+        if handle
+        else None
+    )
+
+    body_json = comment.get("body_json")
+    body_text, body_format = note_body_to_text(body_json or comment.get("body") or "")
+    body_raw = json.dumps(body_json) if body_json else comment.get("body")
+
+    restacked_post = wrapper.get("post")
+    restacked_pub = wrapper.get("publication")
+    is_restack = 1 if (restacked_post or restacked_pub) else 0
+
+    restacked_post_url = None
+    restacked_post_title = None
+    if restacked_post:
+        raw_restack_url = restacked_post.get("canonical_url") or restacked_post.get(
+            "url"
+        )
+        restacked_post_url = (
+            canonicalize_url(raw_restack_url) if raw_restack_url else None
+        )
+        restacked_post_title = restacked_post.get("title")
+    restacked_publication_name = (restacked_pub or {}).get("name")
+
+    attachment_type = None
+    attachment_url = None
+    attachments = comment.get("attachments") or []
+    if attachments:
+        first = attachments[0]
+        attachment_type = first.get("type")
+        if attachment_type == "image":
+            attachment_url = first.get("imageUrl")
+        elif attachment_type == "link":
+            attachment_url = (first.get("linkMetadata") or {}).get("url")
+
+    ancestor_path = comment.get("ancestor_path") or ""
+    word_count = len(body_text.split()) or None
+
+    return SavedNote(
+        substack_note_id=substack_note_id,
+        url=url,
+        body_text=body_text,
+        body_raw=body_raw,
+        body_format=body_format,
+        author_name=comment.get("name"),
+        author_handle=handle,
+        author_id=str(comment.get("user_id")) if comment.get("user_id") else None,
+        publication_name=restacked_publication_name,
+        posted_at=comment.get("date"),
+        saved_at=None,
+        is_saved=1,
+        is_restack=is_restack,
+        parent_note_id=ancestor_path or None,
+        attachment_type=attachment_type,
+        attachment_url=attachment_url,
+        restacked_post_url=restacked_post_url,
+        restacked_post_title=restacked_post_title,
+        restacked_publication_name=restacked_publication_name,
+        like_count=_int_or_none(comment.get("reaction_count")),
+        restack_count=_int_or_none(comment.get("restacks")),
+        reply_count=_int_or_none(comment.get("children_count")),
+        word_count=word_count,
+    )
+
+
+def sync_saved_notes(
+    force: bool = False,
+    db_path: Path | None = None,
+    client: SubstackSavedPostsClient | None = None,
+) -> SyncRun:
+    """Execute an incremental or full sync of Substack saved notes into SQLite cache.
+
+    A sibling of sync_saved_posts, not a generalization of it: notes reconcile
+    by Substack note id (not URL), have no DOM fallback, and — since the notes
+    endpoint never exposes a bookmark timestamp — the incremental early-stop
+    check compares "already saved locally" rather than a saved_at match.
+    """
+    init_db(db_path)
+    sync_mode = "full" if force else "incremental"
+    started_at = datetime.now(UTC).isoformat()
+    sync_id = start_sync_run(sync_mode=sync_mode, entity="note", db_path=db_path)
+
+    active_client = client or SubstackSavedPostsClient()
+    active_client.reset_cache()
+    total_fetched = 0
+    total_upserted = 0
+    consecutive_matches = 0
+    # Only populated meaningfully for a force/full sync, which enumerates every
+    # currently-saved remote note; an incremental sync may stop early and its
+    # partial list must never be used to infer removals.
+    remote_note_ids: list[str] = []
+
+    page_size = 50
+    offset = 0
+
+    try:
+        while True:
+            remote_items = active_client.fetch_saved_notes_page(
+                limit=page_size, offset=offset
+            )
+            if not remote_items:
+                break
+
+            total_fetched += len(remote_items)
+
+            for item in remote_items:
+                parsed_note = parse_remote_note(item)
+                if not parsed_note:
+                    continue
+                remote_note_ids.append(parsed_note.substack_note_id)
+
+                if not force:
+                    existing = get_note_by_substack_id(
+                        parsed_note.substack_note_id, db_path=db_path
+                    )
+                    if existing and existing.is_saved == 1:
+                        consecutive_matches += 1
+                        if consecutive_matches >= MAX_CONSECUTIVE_MATCHES:
+                            logger.info(
+                                f"Incremental note sync: encountered {consecutive_matches} existing matches. Stopping early."
+                            )
+                            break
+                    else:
+                        consecutive_matches = 0
+
+                upsert_note(parsed_note, db_path=db_path)
+                total_upserted += 1
+
+            if not force and consecutive_matches >= MAX_CONSECUTIVE_MATCHES:
+                break
+
+            if len(remote_items) < page_size:
+                break
+
+            offset += page_size
+
+        reconciled_count = 0
+        if force:
+            reconciled_count = reconcile_unsaved_notes(remote_note_ids, db_path=db_path)
+            if reconciled_count:
+                logger.info(
+                    f"Reconciliation: soft-deleted {reconciled_count} note(s) no longer in the remote saved list."
+                )
+
+        finish_sync_run(
+            sync_id=sync_id,
+            status="success",
             fetched_count=total_fetched,
             upserted_count=total_upserted,
+            reconciled_count=reconciled_count,
+            db_path=db_path,
+        )
+        return _build_sync_run(
+            sync_id,
+            "success",
+            sync_mode,
+            "note",
+            started_at,
+            total_fetched,
+            total_upserted,
+            reconciled_count=reconciled_count,
+        )
+
+    except AuthRequiredError as e:
+        msg = str(e)
+        finish_sync_run(
+            sync_id=sync_id,
+            status="auth_required",
+            fetched_count=total_fetched,
+            upserted_count=total_upserted,
+            error_message=msg,
+            db_path=db_path,
+        )
+        return _build_sync_run(
+            sync_id,
+            "auth_required",
+            sync_mode,
+            "note",
+            started_at,
+            total_fetched,
+            total_upserted,
+            error_message=msg,
+        )
+    except Exception as e:
+        msg = f"Sync failed: {e!s}"
+        logger.exception(msg)
+        finish_sync_run(
+            sync_id=sync_id,
+            status="failed",
+            fetched_count=total_fetched,
+            upserted_count=total_upserted,
+            error_message=msg,
+            db_path=db_path,
+        )
+        return _build_sync_run(
+            sync_id,
+            "failed",
+            sync_mode,
+            "note",
+            started_at,
+            total_fetched,
+            total_upserted,
             error_message=msg,
         )

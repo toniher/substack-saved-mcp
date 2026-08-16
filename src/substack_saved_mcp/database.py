@@ -9,12 +9,17 @@ from pathlib import Path
 from substack_saved_mcp.config import get_db_path
 from substack_saved_mcp.models import (
     AudienceSummary,
+    NoteAuthorSummary,
+    NoteSummary,
     PostSummary,
     PublicationSummary,
+    SavedNote,
     SavedPost,
     SavedPostsStatus,
 )
 from substack_saved_mcp.url_utils import canonicalize_url
+
+_NOTE_SORT_COLUMNS = {"saved_at": "saved_at", "posted_at": "posted_at"}
 
 
 @contextmanager
@@ -94,11 +99,77 @@ def init_db(db_path: Path | None = None) -> None:
                 completed_at TEXT,
                 status TEXT NOT NULL,
                 sync_mode TEXT NOT NULL DEFAULT 'incremental',
+                entity TEXT NOT NULL DEFAULT 'post',
                 fetched_count INTEGER DEFAULT 0,
                 upserted_count INTEGER DEFAULT 0,
                 reconciled_count INTEGER DEFAULT 0,
                 error_message TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                substack_note_id TEXT NOT NULL UNIQUE,
+                url TEXT UNIQUE,
+                body_text TEXT NOT NULL DEFAULT '',
+                body_raw TEXT,
+                body_format TEXT,
+                author_name TEXT,
+                author_handle TEXT,
+                author_id TEXT,
+                publication_name TEXT,
+                publication_url TEXT,
+                posted_at TEXT,
+                saved_at TEXT,
+                unsaved_at TEXT,
+                is_saved INTEGER NOT NULL DEFAULT 1,
+                is_restack INTEGER NOT NULL DEFAULT 0,
+                parent_note_id TEXT,
+                attachment_type TEXT,
+                attachment_url TEXT,
+                restacked_post_url TEXT,
+                restacked_post_title TEXT,
+                restacked_publication_name TEXT,
+                like_count INTEGER,
+                restack_count INTEGER,
+                reply_count INTEGER,
+                word_count INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notes_url ON notes(url);
+            CREATE INDEX IF NOT EXISTS idx_notes_saved_at ON notes(saved_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_notes_posted_at ON notes(posted_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_notes_is_saved ON notes(is_saved);
+            CREATE INDEX IF NOT EXISTS idx_notes_author ON notes(author_handle);
+
+            -- FTS5 Full-Text Search Virtual Table for notes
+            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+                body_text,
+                author_name,
+                author_handle,
+                publication_name,
+                restacked_post_title,
+                content='notes',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+                INSERT INTO notes_fts(rowid, body_text, author_name, author_handle, publication_name, restacked_post_title)
+                VALUES (new.id, new.body_text, new.author_name, new.author_handle, new.publication_name, new.restacked_post_title);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+                INSERT INTO notes_fts(notes_fts, rowid, body_text, author_name, author_handle, publication_name, restacked_post_title)
+                VALUES('delete', old.id, old.body_text, old.author_name, old.author_handle, old.publication_name, old.restacked_post_title);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+                INSERT INTO notes_fts(notes_fts, rowid, body_text, author_name, author_handle, publication_name, restacked_post_title)
+                VALUES('delete', old.id, old.body_text, old.author_name, old.author_handle, old.publication_name, old.restacked_post_title);
+                INSERT INTO notes_fts(rowid, body_text, author_name, author_handle, publication_name, restacked_post_title)
+                VALUES (new.id, new.body_text, new.author_name, new.author_handle, new.publication_name, new.restacked_post_title);
+            END;
 
             -- FTS5 Full-Text Search Virtual Table
             CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
@@ -137,26 +208,41 @@ def init_db(db_path: Path | None = None) -> None:
         except sqlite3.OperationalError:
             pass  # column already present
 
+        # Additive migration for databases created before notes support existed.
+        # Every historical run was a posts sync, so backfilling 'post' is correct.
+        try:
+            conn.execute(
+                "ALTER TABLE sync_runs ADD COLUMN entity TEXT NOT NULL DEFAULT 'post'"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already present
+
 
 def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
-    """Insert or update a post in the database. Returns the updated SavedPost object."""
+    """Insert or update a post in the database. Returns the updated SavedPost object.
+
+    Looks up by substack_post_id or URL, then branches into an explicit UPDATE
+    or INSERT rather than ``INSERT ... ON CONFLICT(url)``. The old ON-CONFLICT
+    approach could raise: a post found by id whose canonical URL has since
+    changed (slug rename, custom-domain migration) doesn't conflict on the new
+    URL, so SQLite would attempt an INSERT and trip the substack_post_id UNIQUE
+    constraint instead. This mirrors upsert_note's lookup-then-branch pattern,
+    which never had that trap.
+    """
     now_iso = datetime.now(UTC).isoformat()
     clean_url = canonicalize_url(post.url)
 
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        # Check if record already exists by substack_post_id or URL
         existing = None
         if post.substack_post_id:
             cursor.execute(
-                "SELECT id, created_at, saved_at FROM posts WHERE substack_post_id = ?",
+                "SELECT * FROM posts WHERE substack_post_id = ?",
                 (post.substack_post_id,),
             )
             existing = cursor.fetchone()
         if not existing and clean_url:
-            cursor.execute(
-                "SELECT id, created_at, saved_at FROM posts WHERE url = ?", (clean_url,)
-            )
+            cursor.execute("SELECT * FROM posts WHERE url = ?", (clean_url,))
             existing = cursor.fetchone()
 
         created_at = existing["created_at"] if existing else now_iso
@@ -164,58 +250,97 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
         # When the source does not expose the original Substack bookmark time, leave
         # saved_at NULL rather than stamping now().
         saved_at = post.saved_at or (existing["saved_at"] if existing else None)
-
-        cursor.execute(
-            """
-            INSERT INTO posts (
-                substack_post_id, url, title, publication_name, publication_url,
-                author_name, published_at, saved_at, unsaved_at, is_saved,
-                excerpt, content_text, image_url, audience, is_paywalled, reading_time_minutes,
-                word_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                substack_post_id = COALESCE(excluded.substack_post_id, posts.substack_post_id),
-                title = excluded.title,
-                publication_name = excluded.publication_name,
-                publication_url = COALESCE(excluded.publication_url, posts.publication_url),
-                author_name = COALESCE(excluded.author_name, posts.author_name),
-                published_at = COALESCE(excluded.published_at, posts.published_at),
-                saved_at = COALESCE(excluded.saved_at, posts.saved_at),
-                unsaved_at = excluded.unsaved_at,
-                is_saved = excluded.is_saved,
-                excerpt = COALESCE(excluded.excerpt, posts.excerpt),
-                content_text = COALESCE(excluded.content_text, posts.content_text),
-                image_url = COALESCE(excluded.image_url, posts.image_url),
-                audience = COALESCE(excluded.audience, posts.audience),
-                is_paywalled = excluded.is_paywalled,
-                reading_time_minutes = COALESCE(excluded.reading_time_minutes, posts.reading_time_minutes),
-                word_count = COALESCE(excluded.word_count, posts.word_count),
-                updated_at = excluded.updated_at
-        """,
-            (
-                post.substack_post_id,
-                clean_url,
-                post.title,
-                post.publication_name,
-                post.publication_url,
-                post.author_name,
-                post.published_at,
-                saved_at,
-                post.unsaved_at,
-                post.is_saved,
-                post.excerpt,
-                post.content_text,
-                post.image_url,
-                post.audience,
-                post.is_paywalled,
-                post.reading_time_minutes,
-                post.word_count,
-                created_at,
-                now_iso,
-            ),
+        substack_post_id = post.substack_post_id or (
+            existing["substack_post_id"] if existing else None
         )
+        publication_url = post.publication_url or (
+            existing["publication_url"] if existing else None
+        )
+        author_name = post.author_name or (
+            existing["author_name"] if existing else None
+        )
+        published_at = post.published_at or (
+            existing["published_at"] if existing else None
+        )
+        excerpt = post.excerpt or (existing["excerpt"] if existing else None)
+        content_text = post.content_text or (
+            existing["content_text"] if existing else None
+        )
+        image_url = post.image_url or (existing["image_url"] if existing else None)
+        audience = post.audience or (existing["audience"] if existing else None)
+        reading_time_minutes = post.reading_time_minutes or (
+            existing["reading_time_minutes"] if existing else None
+        )
+        word_count = post.word_count or (existing["word_count"] if existing else None)
 
-        post_id = cursor.lastrowid if not existing else existing["id"]
+        if existing:
+            cursor.execute(
+                """
+                UPDATE posts SET
+                    substack_post_id = ?, url = ?, title = ?, publication_name = ?,
+                    publication_url = ?, author_name = ?, published_at = ?, saved_at = ?,
+                    unsaved_at = ?, is_saved = ?, excerpt = ?, content_text = ?,
+                    image_url = ?, audience = ?, is_paywalled = ?, reading_time_minutes = ?,
+                    word_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    substack_post_id,
+                    clean_url,
+                    post.title,
+                    post.publication_name,
+                    publication_url,
+                    author_name,
+                    published_at,
+                    saved_at,
+                    post.unsaved_at,
+                    post.is_saved,
+                    excerpt,
+                    content_text,
+                    image_url,
+                    audience,
+                    post.is_paywalled,
+                    reading_time_minutes,
+                    word_count,
+                    now_iso,
+                    existing["id"],
+                ),
+            )
+            post_id = existing["id"]
+        else:
+            cursor.execute(
+                """
+                INSERT INTO posts (
+                    substack_post_id, url, title, publication_name, publication_url,
+                    author_name, published_at, saved_at, unsaved_at, is_saved,
+                    excerpt, content_text, image_url, audience, is_paywalled, reading_time_minutes,
+                    word_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    substack_post_id,
+                    clean_url,
+                    post.title,
+                    post.publication_name,
+                    publication_url,
+                    author_name,
+                    published_at,
+                    saved_at,
+                    post.unsaved_at,
+                    post.is_saved,
+                    excerpt,
+                    content_text,
+                    image_url,
+                    audience,
+                    post.is_paywalled,
+                    reading_time_minutes,
+                    word_count,
+                    created_at,
+                    now_iso,
+                ),
+            )
+            post_id = cursor.lastrowid
+
         cursor.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
         row = cursor.fetchone()
         return SavedPost(**dict(row))
@@ -345,6 +470,46 @@ def list_posts(
         return [PostSummary(**dict(r)) for r in cursor.fetchall()]
 
 
+def _post_search_filters(
+    publication: str | None,
+    audience: str | None,
+    published_after: str | None,
+    published_before: str | None,
+    saved_after: str | None,
+    saved_before: str | None,
+    is_saved_only: bool,
+    column_prefix: str = "",
+) -> tuple[list[str], list[str | int]]:
+    """Build shared WHERE clauses/params for search_posts, used by both the FTS
+    branch and the LIKE fallback so a malformed FTS query never silently drops
+    filters (the bug the notes search code was built to avoid from the start)."""
+    where_clauses = []
+    params: list[str | int] = []
+
+    if is_saved_only:
+        where_clauses.append(f"{column_prefix}is_saved = 1")
+    if publication:
+        where_clauses.append(f"LOWER({column_prefix}publication_name) LIKE LOWER(?)")
+        params.append(f"%{publication}%")
+    if audience:
+        where_clauses.append(f"LOWER({column_prefix}audience) = LOWER(?)")
+        params.append(audience)
+    if published_after:
+        where_clauses.append(f"{column_prefix}published_at >= ?")
+        params.append(published_after)
+    if published_before:
+        where_clauses.append(f"{column_prefix}published_at <= ?")
+        params.append(published_before)
+    if saved_after:
+        where_clauses.append(f"{column_prefix}saved_at >= ?")
+        params.append(saved_after)
+    if saved_before:
+        where_clauses.append(f"{column_prefix}saved_at <= ?")
+        params.append(saved_before)
+
+    return where_clauses, params
+
+
 def search_posts(
     query: str,
     publication: str | None = None,
@@ -358,29 +523,18 @@ def search_posts(
     db_path: Path | None = None,
 ) -> list[PostSummary]:
     """Full-text search over posts using FTS5 BM25 relevance ranking and metadata filters."""
-    where_clauses = ["posts_fts MATCH ?"]
-    params: list[str | int] = [query]
-
-    if is_saved_only:
-        where_clauses.append("p.is_saved = 1")
-    if publication:
-        where_clauses.append("LOWER(p.publication_name) LIKE LOWER(?)")
-        params.append(f"%{publication}%")
-    if audience:
-        where_clauses.append("LOWER(p.audience) = LOWER(?)")
-        params.append(audience)
-    if published_after:
-        where_clauses.append("p.published_at >= ?")
-        params.append(published_after)
-    if published_before:
-        where_clauses.append("p.published_at <= ?")
-        params.append(published_before)
-    if saved_after:
-        where_clauses.append("p.saved_at >= ?")
-        params.append(saved_after)
-    if saved_before:
-        where_clauses.append("p.saved_at <= ?")
-        params.append(saved_before)
+    filter_clauses, filter_params = _post_search_filters(
+        publication,
+        audience,
+        published_after,
+        published_before,
+        saved_after,
+        saved_before,
+        is_saved_only,
+        column_prefix="p.",
+    )
+    where_clauses = ["posts_fts MATCH ?", *filter_clauses]
+    params: list[str | int] = [query, *filter_params]
 
     sql = f"""
         SELECT p.id, p.substack_post_id, p.url, p.title, p.publication_name, p.author_name,
@@ -400,21 +554,30 @@ def search_posts(
             cursor.execute(sql, params)
             return [PostSummary(**dict(r)) for r in cursor.fetchall()]
         except sqlite3.OperationalError:
-            # Fallback to standard LIKE if FTS query syntax is special/malformed
+            # Fallback to standard LIKE if FTS query syntax is special/malformed.
+            # Reuses the same filter clauses as the FTS branch above so a
+            # malformed query never silently drops publication/audience/date filters.
             like_query = f"%{query}%"
+            fallback_clauses, fallback_params = _post_search_filters(
+                publication,
+                audience,
+                published_after,
+                published_before,
+                saved_after,
+                saved_before,
+                is_saved_only,
+            )
             fallback_where = [
                 "(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)",
-                "is_saved = 1",
+                *fallback_clauses,
             ]
-            fallback_params: list[str | int] = [
+            params2: list[str | int] = [
                 like_query,
                 like_query,
                 like_query,
                 like_query,
+                *fallback_params,
             ]
-            if audience:
-                fallback_where.append("LOWER(audience) = LOWER(?)")
-                fallback_params.append(audience)
             fallback_sql = f"""
                 SELECT id, substack_post_id, url, title, publication_name, author_name,
                        published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
@@ -424,8 +587,8 @@ def search_posts(
                 ORDER BY saved_at DESC
                 LIMIT ?
             """
-            fallback_params.append(limit)
-            cursor.execute(fallback_sql, fallback_params)
+            params2.append(limit)
+            cursor.execute(fallback_sql, params2)
             return [PostSummary(**dict(r)) for r in cursor.fetchall()]
 
 
@@ -481,17 +644,43 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
         )
         total_pubs = cursor.fetchone()[0]
 
+        cursor.execute("SELECT COUNT(*) FROM notes WHERE is_saved = 1")
+        total_saved_notes = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM notes WHERE is_saved = 0")
+        total_unsaved_notes = cursor.fetchone()[0]
+
         cursor.execute("""
             SELECT completed_at, status FROM sync_runs
-            WHERE status = 'success'
+            WHERE status = 'success' AND entity = 'post'
             ORDER BY id DESC LIMIT 1
         """)
         last_success_row = cursor.fetchone()
         last_success = last_success_row["completed_at"] if last_success_row else None
 
-        cursor.execute("SELECT status FROM sync_runs ORDER BY id DESC LIMIT 1")
+        cursor.execute(
+            "SELECT status FROM sync_runs WHERE entity = 'post' ORDER BY id DESC LIMIT 1"
+        )
         last_status_row = cursor.fetchone()
         last_status = last_status_row["status"] if last_status_row else None
+
+        cursor.execute("""
+            SELECT completed_at, status FROM sync_runs
+            WHERE status = 'success' AND entity = 'note'
+            ORDER BY id DESC LIMIT 1
+        """)
+        last_note_success_row = cursor.fetchone()
+        last_note_success = (
+            last_note_success_row["completed_at"] if last_note_success_row else None
+        )
+
+        cursor.execute(
+            "SELECT status FROM sync_runs WHERE entity = 'note' ORDER BY id DESC LIMIT 1"
+        )
+        last_note_status_row = cursor.fetchone()
+        last_note_status = (
+            last_note_status_row["status"] if last_note_status_row else None
+        )
 
         return SavedPostsStatus(
             total_saved_posts=total_saved,
@@ -499,21 +688,27 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
             total_publications=total_pubs,
             last_successful_sync=last_success,
             last_sync_status=last_status,
+            total_saved_notes=total_saved_notes,
+            total_unsaved_notes=total_unsaved_notes,
+            last_successful_note_sync=last_note_success,
+            last_note_sync_status=last_note_status,
             database_path=str(target_path),
         )
 
 
-def start_sync_run(sync_mode: str = "incremental", db_path: Path | None = None) -> int:
+def start_sync_run(
+    sync_mode: str = "incremental", entity: str = "post", db_path: Path | None = None
+) -> int:
     """Create a sync_runs entry and return its ID."""
     now_iso = datetime.now(UTC).isoformat()
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO sync_runs (started_at, status, sync_mode)
-            VALUES (?, 'running', ?)
+            INSERT INTO sync_runs (started_at, status, sync_mode, entity)
+            VALUES (?, 'running', ?, ?)
         """,
-            (now_iso, sync_mode),
+            (now_iso, sync_mode, entity),
         )
         return cursor.lastrowid  # type: ignore
 
@@ -548,3 +743,408 @@ def finish_sync_run(
                 sync_id,
             ),
         )
+
+
+def upsert_note(note: SavedNote, db_path: Path | None = None) -> SavedNote:
+    """Insert or update a note in the database. Returns the updated SavedNote object.
+
+    Looks up by substack_note_id (the note's identity) and branches into an
+    explicit UPDATE or INSERT, rather than `INSERT ... ON CONFLICT(url)` as
+    posts does — posts.url is not a reliable conflict target since notes may
+    have no clean permalink, and a note's identity is unambiguous via its id.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, created_at, saved_at, url, body_raw, author_name, author_handle, author_id "
+            "FROM notes WHERE substack_note_id = ?",
+            (note.substack_note_id,),
+        )
+        existing = cursor.fetchone()
+
+        created_at = existing["created_at"] if existing else now_iso
+        # Never fabricate saved_at: Substack's saved-notes endpoint doesn't expose
+        # a bookmark timestamp at all, so this will typically stay None.
+        saved_at = note.saved_at or (existing["saved_at"] if existing else None)
+        url = note.url or (existing["url"] if existing else None)
+        body_raw = note.body_raw or (existing["body_raw"] if existing else None)
+        author_name = note.author_name or (
+            existing["author_name"] if existing else None
+        )
+        author_handle = note.author_handle or (
+            existing["author_handle"] if existing else None
+        )
+        author_id = note.author_id or (existing["author_id"] if existing else None)
+
+        if existing:
+            cursor.execute(
+                """
+                UPDATE notes SET
+                    url = ?, body_text = ?, body_raw = ?, body_format = ?,
+                    author_name = ?, author_handle = ?, author_id = ?,
+                    publication_name = ?, publication_url = ?, posted_at = ?,
+                    saved_at = ?, unsaved_at = ?, is_saved = ?, is_restack = ?,
+                    parent_note_id = ?, attachment_type = ?, attachment_url = ?,
+                    restacked_post_url = ?, restacked_post_title = ?,
+                    restacked_publication_name = ?, like_count = ?, restack_count = ?,
+                    reply_count = ?, word_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    url,
+                    note.body_text,
+                    body_raw,
+                    note.body_format,
+                    author_name,
+                    author_handle,
+                    author_id,
+                    note.publication_name,
+                    note.publication_url,
+                    note.posted_at,
+                    saved_at,
+                    note.unsaved_at,
+                    note.is_saved,
+                    note.is_restack,
+                    note.parent_note_id,
+                    note.attachment_type,
+                    note.attachment_url,
+                    note.restacked_post_url,
+                    note.restacked_post_title,
+                    note.restacked_publication_name,
+                    note.like_count,
+                    note.restack_count,
+                    note.reply_count,
+                    note.word_count,
+                    now_iso,
+                    existing["id"],
+                ),
+            )
+            note_id = existing["id"]
+        else:
+            cursor.execute(
+                """
+                INSERT INTO notes (
+                    substack_note_id, url, body_text, body_raw, body_format,
+                    author_name, author_handle, author_id, publication_name,
+                    publication_url, posted_at, saved_at, unsaved_at, is_saved,
+                    is_restack, parent_note_id, attachment_type, attachment_url,
+                    restacked_post_url, restacked_post_title, restacked_publication_name,
+                    like_count, restack_count, reply_count, word_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note.substack_note_id,
+                    url,
+                    note.body_text,
+                    body_raw,
+                    note.body_format,
+                    author_name,
+                    author_handle,
+                    author_id,
+                    note.publication_name,
+                    note.publication_url,
+                    note.posted_at,
+                    saved_at,
+                    note.unsaved_at,
+                    note.is_saved,
+                    note.is_restack,
+                    note.parent_note_id,
+                    note.attachment_type,
+                    note.attachment_url,
+                    note.restacked_post_url,
+                    note.restacked_post_title,
+                    note.restacked_publication_name,
+                    note.like_count,
+                    note.restack_count,
+                    note.reply_count,
+                    note.word_count,
+                    created_at,
+                    now_iso,
+                ),
+            )
+            note_id = cursor.lastrowid
+
+        cursor.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        return SavedNote(**dict(cursor.fetchone()))
+
+
+def get_note(url_or_id: str | int, db_path: Path | None = None) -> SavedNote | None:
+    """Retrieve full note record by local ID, Substack note ID, or URL."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        if isinstance(url_or_id, int) or (
+            isinstance(url_or_id, str) and url_or_id.isdigit()
+        ):
+            cursor.execute("SELECT * FROM notes WHERE id = ?", (int(url_or_id),))
+        else:
+            clean_url = canonicalize_url(str(url_or_id))
+            cursor.execute(
+                "SELECT * FROM notes WHERE url = ? OR substack_note_id = ?",
+                (clean_url, str(url_or_id)),
+            )
+        row = cursor.fetchone()
+        return SavedNote(**dict(row)) if row else None
+
+
+def get_note_by_substack_id(
+    substack_note_id: str, db_path: Path | None = None
+) -> SavedNote | None:
+    """Retrieve a note by its Substack note id unambiguously.
+
+    ``get_note()``'s ``url_or_id`` dispatch treats any all-digit string as a
+    local row id, and ``substack_note_id`` values are always digits — so sync's
+    incremental-check loop, which only ever has the Substack id in hand, needs
+    this instead of risking a collision with an unrelated local row.
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM notes WHERE substack_note_id = ?", (substack_note_id,)
+        )
+        row = cursor.fetchone()
+        return SavedNote(**dict(row)) if row else None
+
+
+def soft_delete_note(
+    url_or_id: str | int, db_path: Path | None = None
+) -> SavedNote | None:
+    """Mark a note as unsaved (is_saved = 0, unsaved_at = now)."""
+    now_iso = datetime.now(UTC).isoformat()
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+
+        if isinstance(url_or_id, int) or (
+            isinstance(url_or_id, str) and url_or_id.isdigit()
+        ):
+            cursor.execute("SELECT * FROM notes WHERE id = ?", (int(url_or_id),))
+        else:
+            clean_url = canonicalize_url(str(url_or_id))
+            cursor.execute(
+                "SELECT * FROM notes WHERE url = ? OR substack_note_id = ?",
+                (clean_url, str(url_or_id)),
+            )
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        cursor.execute(
+            "UPDATE notes SET is_saved = 0, unsaved_at = ?, updated_at = ? WHERE id = ?",
+            (now_iso, now_iso, row["id"]),
+        )
+
+        cursor.execute("SELECT * FROM notes WHERE id = ?", (row["id"],))
+        return SavedNote(**dict(cursor.fetchone()))
+
+
+def reconcile_unsaved_notes(
+    remote_note_ids: list[str], db_path: Path | None = None
+) -> int:
+    """Soft-delete locally-active notes absent from a complete remote saved-note-id set.
+
+    Keys on substack_note_id rather than URL, since a note's id is its reliable
+    identity. Intended for use only after a full sync; skips entirely when
+    remote_note_ids is empty, since that's more likely a fetch problem than
+    genuine mass-unsaving.
+    """
+    if not remote_note_ids:
+        return 0
+    remote_ids = {str(i) for i in remote_note_ids if i}
+
+    now_iso = datetime.now(UTC).isoformat()
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, substack_note_id FROM notes WHERE is_saved = 1")
+        stale_ids = [
+            row["id"]
+            for row in cursor.fetchall()
+            if row["substack_note_id"] not in remote_ids
+        ]
+        if not stale_ids:
+            return 0
+
+        cursor.executemany(
+            "UPDATE notes SET is_saved = 0, unsaved_at = ?, updated_at = ? WHERE id = ?",
+            [(now_iso, now_iso, note_id) for note_id in stale_ids],
+        )
+        return len(stale_ids)
+
+
+def list_notes(
+    limit: int = 20,
+    offset: int = 0,
+    author: str | None = None,
+    is_restack: bool | None = None,
+    sort_by: str = "saved_at",
+    is_saved_only: bool = True,
+    db_path: Path | None = None,
+) -> list[NoteSummary]:
+    """List notes with pagination, author/restack filters, and sorting."""
+    order_col = _NOTE_SORT_COLUMNS.get(sort_by, "saved_at")
+    where_clauses = []
+    params: list[str | int] = []
+
+    if is_saved_only:
+        where_clauses.append("is_saved = 1")
+    if author:
+        where_clauses.append(
+            "(LOWER(author_handle) LIKE LOWER(?) OR LOWER(author_name) LIKE LOWER(?))"
+        )
+        params.extend([f"%{author}%", f"%{author}%"])
+    if is_restack is not None:
+        where_clauses.append("is_restack = ?")
+        params.append(1 if is_restack else 0)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    sql = f"""
+        SELECT id, substack_note_id, url, substr(body_text, 1, 240) AS body_preview,
+               author_name, author_handle, publication_name, posted_at, saved_at,
+               is_saved, is_restack, restacked_post_title, restacked_post_url,
+               like_count, restack_count, reply_count
+        FROM notes
+        {where_sql}
+        ORDER BY {order_col} DESC NULLS LAST
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return [NoteSummary(**dict(r)) for r in cursor.fetchall()]
+
+
+def _note_search_filters(
+    author: str | None,
+    posted_after: str | None,
+    posted_before: str | None,
+    saved_after: str | None,
+    saved_before: str | None,
+    is_saved_only: bool,
+    column_prefix: str = "",
+) -> tuple[list[str], list[str | int]]:
+    """Build shared WHERE clauses/params for search_notes, used by both the FTS
+    branch and the LIKE fallback so a malformed FTS query never silently drops
+    filters (the bug present in search_posts's fallback)."""
+    where_clauses = []
+    params: list[str | int] = []
+
+    if is_saved_only:
+        where_clauses.append(f"{column_prefix}is_saved = 1")
+    if author:
+        where_clauses.append(
+            f"(LOWER({column_prefix}author_handle) LIKE LOWER(?) "
+            f"OR LOWER({column_prefix}author_name) LIKE LOWER(?))"
+        )
+        params.extend([f"%{author}%", f"%{author}%"])
+    if posted_after:
+        where_clauses.append(f"{column_prefix}posted_at >= ?")
+        params.append(posted_after)
+    if posted_before:
+        where_clauses.append(f"{column_prefix}posted_at <= ?")
+        params.append(posted_before)
+    if saved_after:
+        where_clauses.append(f"{column_prefix}saved_at >= ?")
+        params.append(saved_after)
+    if saved_before:
+        where_clauses.append(f"{column_prefix}saved_at <= ?")
+        params.append(saved_before)
+
+    return where_clauses, params
+
+
+def search_notes(
+    query: str,
+    author: str | None = None,
+    posted_after: str | None = None,
+    posted_before: str | None = None,
+    saved_after: str | None = None,
+    saved_before: str | None = None,
+    limit: int = 20,
+    is_saved_only: bool = True,
+    db_path: Path | None = None,
+) -> list[NoteSummary]:
+    """Full-text search over notes using FTS5 BM25 relevance ranking and metadata filters."""
+    filter_clauses, filter_params = _note_search_filters(
+        author,
+        posted_after,
+        posted_before,
+        saved_after,
+        saved_before,
+        is_saved_only,
+        column_prefix="n.",
+    )
+    where_clauses = ["notes_fts MATCH ?", *filter_clauses]
+    params: list[str | int] = [query, *filter_params]
+
+    sql = f"""
+        SELECT n.id, n.substack_note_id, n.url, substr(n.body_text, 1, 240) AS body_preview,
+               n.author_name, n.author_handle, n.publication_name, n.posted_at, n.saved_at,
+               n.is_saved, n.is_restack, n.restacked_post_title, n.restacked_post_url,
+               n.like_count, n.restack_count, n.reply_count
+        FROM notes_fts fts
+        JOIN notes n ON fts.rowid = n.id
+        WHERE {" AND ".join(where_clauses)}
+        ORDER BY fts.rank
+        LIMIT ?
+    """
+    params.append(limit)
+
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql, params)
+            return [NoteSummary(**dict(r)) for r in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            # Fallback to standard LIKE if FTS query syntax is special/malformed.
+            # Reuses the same filter clauses as the FTS branch above so a
+            # malformed query never silently drops author/date filters.
+            like_query = f"%{query}%"
+            fallback_clauses, fallback_params = _note_search_filters(
+                author,
+                posted_after,
+                posted_before,
+                saved_after,
+                saved_before,
+                is_saved_only,
+            )
+            fallback_where = [
+                "(body_text LIKE ? OR author_name LIKE ? OR author_handle LIKE ?)",
+                *fallback_clauses,
+            ]
+            params2: list[str | int] = [
+                like_query,
+                like_query,
+                like_query,
+                *fallback_params,
+            ]
+            fallback_sql = f"""
+                SELECT id, substack_note_id, url, substr(body_text, 1, 240) AS body_preview,
+                       author_name, author_handle, publication_name, posted_at, saved_at,
+                       is_saved, is_restack, restacked_post_title, restacked_post_url,
+                       like_count, restack_count, reply_count
+                FROM notes
+                WHERE {" AND ".join(fallback_where)}
+                ORDER BY saved_at DESC
+                LIMIT ?
+            """
+            params2.append(limit)
+            cursor.execute(fallback_sql, params2)
+            return [NoteSummary(**dict(r)) for r in cursor.fetchall()]
+
+
+def list_note_authors(db_path: Path | None = None) -> list[NoteAuthorSummary]:
+    """Return distinct note authors present in cache with active saved note counts."""
+    sql = """
+        SELECT author_handle, MAX(author_name) as author_name, COUNT(*) as note_count
+        FROM notes
+        WHERE is_saved = 1
+        GROUP BY author_handle
+        ORDER BY note_count DESC
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        return [NoteAuthorSummary(**dict(r)) for r in cursor.fetchall()]

@@ -6,8 +6,14 @@ import pytest
 from click.testing import CliRunner
 
 from substack_saved_mcp.cli import cli
-from substack_saved_mcp.database import get_post, init_db, upsert_post
-from substack_saved_mcp.models import SavedPost
+from substack_saved_mcp.database import (
+    get_note,
+    get_post,
+    init_db,
+    upsert_note,
+    upsert_post,
+)
+from substack_saved_mcp.models import SavedNote, SavedPost
 
 
 @pytest.fixture(autouse=True)
@@ -211,3 +217,145 @@ def test_cli_get_content_not_found(setup_cli_db):
     res = runner.invoke(cli, ["get-content", "https://cli.substack.com/p/missing"])
     assert res.exit_code == 0
     assert "not found" in res.output
+
+
+def test_cli_list_notes_and_search_notes(setup_cli_db):
+    upsert_note(
+        SavedNote(
+            substack_note_id="1",
+            url="https://substack.com/@alice/note/c-1",
+            body_text="A note about kubernetes deployments",
+            author_name="Alice Smith",
+            author_handle="alice",
+            posted_at="2026-07-01T10:00:00Z",
+        ),
+        setup_cli_db,
+    )
+
+    runner = CliRunner()
+
+    res_list = runner.invoke(cli, ["list-notes"])
+    assert res_list.exit_code == 0
+    assert "@alice" in res_list.output
+    assert "kubernetes" in res_list.output
+
+    res_search = runner.invoke(cli, ["search-notes", "kubernetes"])
+    assert res_search.exit_code == 0
+    assert "@alice" in res_search.output
+
+    res_authors = runner.invoke(cli, ["note-authors"])
+    assert res_authors.exit_code == 0
+    assert "@alice" in res_authors.output
+
+
+def test_cli_save_note(setup_cli_db):
+    runner = CliRunner()
+
+    with patch("substack_saved_mcp.cli.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.save_note.return_value = (
+            SavedNote(
+                substack_note_id="1",
+                url="https://substack.com/@alice/note/c-1",
+                body_text="A saved note",
+                author_handle="alice",
+            ),
+            "confirmed",
+        )
+        res = runner.invoke(cli, ["save-note", "https://substack.com/@alice/note/c-1"])
+        assert res.exit_code == 0
+        assert "Successfully saved note" in res.output
+        assert "Warning" not in res.output
+
+    cached = get_note("https://substack.com/@alice/note/c-1", setup_cli_db)
+    assert cached is not None
+    assert cached.author_handle == "alice"
+
+
+def test_cli_save_note_unconfirmed_shows_warning(setup_cli_db):
+    runner = CliRunner()
+
+    with patch("substack_saved_mcp.cli.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.save_note.return_value = (
+            SavedNote(
+                substack_note_id="1",
+                url="https://substack.com/@alice/note/c-1",
+                body_text="A saved note",
+                author_handle="alice",
+            ),
+            "unconfirmed",
+        )
+        res = runner.invoke(cli, ["save-note", "https://substack.com/@alice/note/c-1"])
+        assert res.exit_code == 0
+        assert "Warning" in res.output
+
+
+def test_cli_unsave_note(setup_cli_db):
+    upsert_note(
+        SavedNote(
+            substack_note_id="1",
+            url="https://substack.com/@alice/note/c-1",
+            body_text="A note",
+            author_handle="alice",
+        ),
+        setup_cli_db,
+    )
+
+    runner = CliRunner()
+    with patch("substack_saved_mcp.cli.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.unsave_note.return_value = "confirmed"
+        res = runner.invoke(
+            cli, ["unsave-note", "https://substack.com/@alice/note/c-1"]
+        )
+        assert res.exit_code == 0
+        assert "Successfully unsaved note" in res.output
+
+    updated = get_note("https://substack.com/@alice/note/c-1", setup_cli_db)
+    assert updated.is_saved == 0
+
+
+def test_cli_get_note_content_fetches_and_caches(setup_cli_db):
+    upsert_note(
+        SavedNote(
+            substack_note_id="1",
+            url="https://substack.com/@alice/note/c-1",
+            author_handle="alice",
+        ),
+        setup_cli_db,
+    )
+
+    runner = CliRunner()
+    with patch("substack_saved_mcp.cli.SubstackSavedPostsClient") as mock_client_cls:
+        mock_client_cls.return_value.fetch_note_content.return_value = {
+            "body_text": "Full note text.",
+            "body_raw": "Full note text.",
+            "body_format": "text",
+        }
+        res = runner.invoke(cli, ["get-note", "https://substack.com/@alice/note/c-1"])
+        assert res.exit_code == 0
+        assert "Full note text." in res.output
+
+    cached = get_note("https://substack.com/@alice/note/c-1", setup_cli_db)
+    assert cached.body_text == "Full note text."
+
+
+def test_cli_get_note_not_found(setup_cli_db):
+    runner = CliRunner()
+    res = runner.invoke(cli, ["get-note", "https://substack.com/@nobody/note/c-999"])
+    assert res.exit_code == 0
+    assert "not found" in res.output
+
+
+def test_cli_status_includes_notes(setup_cli_db):
+    upsert_note(
+        SavedNote(
+            substack_note_id="1",
+            url="https://substack.com/@alice/note/c-1",
+            author_handle="alice",
+        ),
+        setup_cli_db,
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(cli, ["status"])
+    assert res.exit_code == 0
+    assert "Active Saved Notes  : 1" in res.output

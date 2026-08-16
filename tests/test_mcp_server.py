@@ -5,21 +5,28 @@ from unittest.mock import patch
 
 import pytest
 
-from substack_saved_mcp.database import init_db, upsert_post
+from substack_saved_mcp.database import init_db, upsert_note, upsert_post
 from substack_saved_mcp.mcp_server import (
+    get_note_content,
+    get_note_resource,
     get_post_content,
     get_post_resource,
     get_publications_resource,
+    get_saved_note,
     get_saved_post,
     list_audiences,
     list_publications,
+    list_saved_notes,
     list_saved_posts,
+    save_note,
     save_post,
     saved_posts_status,
+    search_saved_notes,
     search_saved_posts,
+    unsave_note,
     unsave_post,
 )
-from substack_saved_mcp.models import SavedPost
+from substack_saved_mcp.models import SavedNote, SavedPost
 
 
 @pytest.fixture(autouse=True)
@@ -223,3 +230,160 @@ def test_mcp_save_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
     cached = get_saved_post("https://test.substack.com/p/new-post")
     assert cached is not None
     assert cached.is_saved == 1
+
+
+def test_mcp_notes_flow(setup_test_db: Path):
+    n1 = SavedNote(
+        substack_note_id="1",
+        url="https://substack.com/@alice/note/c-1",
+        body_text="A note about building AI agents",
+        author_name="Alice",
+        author_handle="alice",
+        posted_at="2026-07-01T10:00:00Z",
+        is_saved=1,
+    )
+    upsert_note(n1, setup_test_db)
+
+    search_res = search_saved_notes(query="agents")
+    assert len(search_res) == 1
+    assert search_res[0].author_handle == "alice"
+
+    list_res = list_saved_notes(limit=10)
+    assert len(list_res) == 1
+
+    full = get_saved_note("https://substack.com/@alice/note/c-1")
+    assert full is not None
+    assert full.body_text == "A note about building AI agents"
+
+    resource_json = get_note_resource("https://substack.com/@alice/note/c-1")
+    assert "alice" in resource_json
+
+    missing_resource = get_note_resource("https://substack.com/@nobody/note/c-999")
+    assert "not found" in missing_resource
+
+
+def test_mcp_save_note_tool(setup_test_db: Path):
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.save_note.return_value = (
+            SavedNote(
+                substack_note_id="1",
+                url="https://substack.com/@alice/note/c-1",
+                body_text="A new note",
+                author_handle="alice",
+                is_saved=1,
+            ),
+            "confirmed",
+        )
+        res = save_note("https://substack.com/@alice/note/c-1")
+        assert res["success"] is True
+        assert res["remote_confirmed"] is True
+        assert "warning" not in res
+        assert res["note"].author_handle == "alice"
+
+    cached = get_saved_note("https://substack.com/@alice/note/c-1")
+    assert cached is not None
+
+
+def test_mcp_save_note_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.save_note.return_value = (
+            SavedNote(
+                substack_note_id="1",
+                url="https://substack.com/@alice/note/c-1",
+                body_text="A new note",
+                author_handle="alice",
+                is_saved=1,
+            ),
+            "unconfirmed",
+        )
+        res = save_note("https://substack.com/@alice/note/c-1")
+        assert res["success"] is True
+        assert res["remote_confirmed"] is False
+        assert "warning" in res
+
+
+def test_mcp_unsave_note_tool(setup_test_db: Path):
+    n = SavedNote(
+        substack_note_id="1",
+        url="https://substack.com/@alice/note/c-1",
+        author_handle="alice",
+        is_saved=1,
+    )
+    saved = upsert_note(n, setup_test_db)
+
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.unsave_note.return_value = "confirmed"
+        res = unsave_note(saved.url)
+        assert res["success"] is True
+        assert res["remote_confirmed"] is True
+        assert "Warning" not in res["message"]
+
+    note_after = get_saved_note(saved.url)
+    assert note_after.is_saved == 0
+
+
+def test_mcp_unsave_note_tool_surfaces_unconfirmed_warning(setup_test_db: Path):
+    n = SavedNote(
+        substack_note_id="1",
+        url="https://substack.com/@alice/note/c-1",
+        author_handle="alice",
+        is_saved=1,
+    )
+    saved = upsert_note(n, setup_test_db)
+
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.unsave_note.return_value = "not_found"
+        res = unsave_note(saved.url)
+        assert res["success"] is True
+        assert res["remote_confirmed"] is False
+        assert "Warning" in res["message"]
+
+    note_after = get_saved_note(saved.url)
+    assert note_after.is_saved == 0
+
+
+def test_mcp_get_note_content_not_found(setup_test_db: Path):
+    res = get_note_content("https://substack.com/@nobody/note/c-999")
+    assert res["success"] is False
+    assert "not found" in res["message"]
+
+
+def test_mcp_get_note_content_fetches_and_caches(setup_test_db: Path):
+    n = SavedNote(
+        substack_note_id="1",
+        url="https://substack.com/@alice/note/c-1",
+        author_handle="alice",
+    )
+    upsert_note(n, setup_test_db)
+
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        mock_client_cls.return_value.fetch_note_content.return_value = {
+            "body_text": "Full note content.",
+            "body_raw": "Full note content.",
+            "body_format": "text",
+        }
+        res = get_note_content("https://substack.com/@alice/note/c-1")
+        assert res["success"] is True
+        assert "Full note content." in res["content"]
+        assert res["cached"] is False
+
+    cached = get_saved_note("https://substack.com/@alice/note/c-1")
+    assert cached.body_text == "Full note content."
+
+    # A second call should serve from cache without touching the client.
+    with patch(
+        "substack_saved_mcp.mcp_server.SubstackSavedPostsClient"
+    ) as mock_client_cls:
+        res2 = get_note_content("https://substack.com/@alice/note/c-1")
+        assert res2["cached"] is True
+        mock_client_cls.assert_not_called()

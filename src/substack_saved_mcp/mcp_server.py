@@ -5,14 +5,23 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from substack_saved_mcp.content_utils import format_post_for_llm, html_to_llm_text
+from substack_saved_mcp.content_utils import (
+    format_note_for_llm,
+    format_post_for_llm,
+    html_to_llm_text,
+)
 from substack_saved_mcp.database import (
+    get_note,
     get_post,
     get_status,
     init_db,
+    list_notes,
     list_posts,
+    search_notes,
     search_posts,
+    soft_delete_note,
     soft_delete_post,
+    upsert_note,
     upsert_post,
 )
 from substack_saved_mcp.database import (
@@ -23,8 +32,10 @@ from substack_saved_mcp.database import (
 )
 from substack_saved_mcp.models import (
     AudienceSummary,
+    NoteSummary,
     PostSummary,
     PublicationSummary,
+    SavedNote,
     SavedPost,
     SavedPostsStatus,
     SyncRun,
@@ -33,6 +44,7 @@ from substack_saved_mcp.substack_client import (
     AuthRequiredError,
     SubstackSavedPostsClient,
 )
+from substack_saved_mcp.sync import sync_saved_notes as run_sync_notes
 from substack_saved_mcp.sync import sync_saved_posts as run_sync
 
 # Initialize FastMCP Server
@@ -283,6 +295,219 @@ def sync_saved_posts(force: bool = False) -> SyncRun:
     return run_sync(force=force)
 
 
+@mcp.tool()
+def search_saved_notes(
+    query: str,
+    author: str | None = None,
+    posted_after: str | None = None,
+    posted_before: str | None = None,
+    saved_after: str | None = None,
+    saved_before: str | None = None,
+    limit: int = 20,
+) -> list[NoteSummary]:
+    """Perform full-text FTS5 search across cached saved notes.
+
+    Searches body text, author name/handle, and (for restacks) the attached
+    post's title. Allows filtering by author (name or handle), original note
+    date (posted_at), and saved date (saved_at). Notes lack a bookmark
+    timestamp on Substack's side, so saved_at is typically None.
+    """
+    init_db()
+    return search_notes(
+        query=query,
+        author=author,
+        posted_after=posted_after,
+        posted_before=posted_before,
+        saved_after=saved_after,
+        saved_before=saved_before,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+def list_saved_notes(
+    limit: int = 20,
+    offset: int = 0,
+    author: str | None = None,
+    restacks_only: bool = False,
+    sort_by: str = "saved_at",
+) -> list[NoteSummary]:
+    """List cached saved notes with pagination and optional author/restack filters.
+
+    sort_by can be 'saved_at' (when note was bookmarked) or 'posted_at' (when
+    note was posted). restacks_only limits results to notes that restack a post.
+    """
+    init_db()
+    return list_notes(
+        limit=limit,
+        offset=offset,
+        author=author,
+        is_restack=True if restacks_only else None,
+        sort_by=sort_by,
+        is_saved_only=True,
+    )
+
+
+@mcp.tool()
+def get_saved_note(url_or_id: str) -> SavedNote | None:
+    """Retrieve full cached note details (author, body, engagement counts) by URL or local ID."""
+    init_db()
+    return get_note(url_or_id)
+
+
+@mcp.tool()
+def save_note(url: str) -> dict[str, Any]:
+    """Bookmark a Substack note remotely on Substack and save it to the local cache.
+
+    Requires an active authenticated Substack session (run 'substack-saved-mcp
+    login' if expired). remote_confirmed=False means the note is still cached
+    locally, but the tool could not verify the bookmark was actually created on
+    Substack's side — a subsequent 'sync --force' will correct the local cache
+    if the remote save didn't actually happen.
+    """
+    init_db()
+    client = SubstackSavedPostsClient()
+    saved_model, confirmation = client.save_note(url)
+    updated_db_note = upsert_note(saved_model)
+    result: dict[str, Any] = {
+        "success": True,
+        "note": updated_db_note,
+        "remote_confirmed": confirmation == "confirmed",
+    }
+    if confirmation != "confirmed":
+        result["warning"] = (
+            f"Could not confirm the bookmark toggle on Substack's page (status: {confirmation})."
+        )
+    return result
+
+
+@mcp.tool()
+def unsave_note(url_or_id: str) -> dict[str, Any]:
+    """Unbookmark a Substack note remotely and soft-delete it in local cache.
+
+    Soft-deletion preserves note history while removing it from active
+    search/list outputs. remote_confirmed=False means the note was still
+    soft-deleted locally, but the tool could not verify the unbookmark on
+    Substack's side.
+    """
+    init_db()
+    note = get_note(url_or_id)
+    if not note:
+        return {
+            "success": False,
+            "message": f"Note '{url_or_id}' not found in local cache.",
+        }
+
+    client = SubstackSavedPostsClient()
+    confirmation = "unconfirmed"
+    try:
+        confirmation = client.unsave_note(note.url or "", note_id=note.substack_note_id)
+    except AuthRequiredError as e:
+        return {"success": False, "message": str(e)}
+    except Exception:
+        confirmation = "unconfirmed"
+
+    updated_note = soft_delete_note(note.id) if note.id is not None else None
+    message = f"Successfully unsaved note by @{note.author_handle} locally."
+    if confirmation != "confirmed":
+        message += f" Warning: could not confirm the removal on Substack's page (status: {confirmation})."
+    return {
+        "success": True,
+        "message": message,
+        "note": updated_note,
+        "remote_confirmed": confirmation == "confirmed",
+    }
+
+
+@mcp.tool()
+def get_note_content(url_or_id: str, force_refetch: bool = False) -> dict[str, Any]:
+    """Fetch a saved note's full content, cleaned and formatted for LLM consumption.
+
+    Returns the cached body_text if a previous fetch already stored it, unless
+    force_refetch is set. Otherwise fetches the note directly via Substack's
+    reader API (no browser page needed) and caches the result. Requires an
+    active authenticated Substack session.
+    """
+    init_db()
+    note = get_note(url_or_id)
+    if not note:
+        return {
+            "success": False,
+            "message": f"Note '{url_or_id}' not found in local cache.",
+        }
+
+    if note.body_text and not force_refetch:
+        return {
+            "success": True,
+            "note": note,
+            "content": format_note_for_llm(
+                author_name=note.author_name,
+                author_handle=note.author_handle,
+                url=note.url,
+                body_text=note.body_text,
+                posted_at=note.posted_at,
+                restacked_post_title=note.restacked_post_title,
+                restacked_post_url=note.restacked_post_url,
+            ),
+            "cached": True,
+        }
+
+    if not note.url:
+        return {
+            "success": False,
+            "note": note,
+            "message": f"Note '{url_or_id}' has no known permalink; cannot fetch its content.",
+        }
+
+    client = SubstackSavedPostsClient()
+    try:
+        result = client.fetch_note_content(note.url)
+    except AuthRequiredError as e:
+        return {"success": False, "message": str(e)}
+
+    body_text = result.get("body_text")
+    if not body_text:
+        return {
+            "success": False,
+            "note": note,
+            "message": (
+                "Could not find this note's content via Substack's reader API. Run "
+                "'substack-saved-mcp inspect-network' while opening this note "
+                f"({note.url}) in the browser so the real content source can be "
+                "captured, then this tool can be updated."
+            ),
+        }
+
+    note.body_text = body_text
+    note.body_raw = result.get("body_raw")
+    note.body_format = result.get("body_format")
+    updated_note = upsert_note(note)
+
+    return {
+        "success": True,
+        "note": updated_note,
+        "content": format_note_for_llm(
+            author_name=updated_note.author_name,
+            author_handle=updated_note.author_handle,
+            url=updated_note.url,
+            body_text=body_text,
+            posted_at=updated_note.posted_at,
+            restacked_post_title=updated_note.restacked_post_title,
+            restacked_post_url=updated_note.restacked_post_url,
+        ),
+        "cached": False,
+    }
+
+
+@mcp.tool()
+def sync_saved_notes(force: bool = False) -> SyncRun:
+    """Trigger incremental or full resync of saved notes from Substack account into local SQLite cache.
+
+    Requires an active authenticated Substack session.
+    """
+    return run_sync_notes(force=force)
+
+
 # FastMCP Resources
 @mcp.resource("substack://posts/{post_id}")
 def get_post_resource(post_id: str) -> str:
@@ -300,6 +525,16 @@ def get_publications_resource() -> str:
     init_db()
     pubs = db_list_publications()
     return json.dumps([p.model_dump() for p in pubs])
+
+
+@mcp.resource("substack://notes/{note_id}")
+def get_note_resource(note_id: str) -> str:
+    """Resource returning JSON representation of a specific saved note by ID or URL."""
+    init_db()
+    note = get_note(note_id)
+    if not note:
+        return json.dumps({"error": f"Note '{note_id}' not found."})
+    return note.model_dump_json()
 
 
 def run_server() -> None:

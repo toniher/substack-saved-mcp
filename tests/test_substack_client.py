@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from substack_saved_mcp.substack_client import SubstackSavedPostsClient
+import pytest
+
+from substack_saved_mcp.substack_client import (
+    SubstackClientError,
+    SubstackSavedPostsClient,
+)
 
 
 class MockButton:
@@ -337,3 +342,268 @@ def test_unsave_post_impl_falls_back_to_dom_when_api_delete_fails(tmp_path: Path
         playwright_instance=pw,
     )
     assert status == "confirmed"  # confirmed via the DOM fallback, not the API
+
+
+class MockNoteApiResponse:
+    """API response double for notes: no browser page needed at all, so this
+    is the only mock notes' save/unsave/fetch tests require."""
+
+    def __init__(
+        self, ok=True, status=200, json_data=None, url="https://substack.com/"
+    ):
+        self.ok = ok
+        self.status = status
+        self._json_data = json_data or {}
+        self.url = url
+
+    def json(self):
+        return self._json_data
+
+
+class MockNoteApiRequestContext:
+    def __init__(self, get_responses=None, post_ok=True, delete_ok=True):
+        self._get_responses = get_responses or {}
+        self._post_ok = post_ok
+        self._delete_ok = delete_ok
+        self.posted_urls: list[str] = []
+        self.deleted_urls: list[str] = []
+
+    def get(self, url):
+        for prefix, response in self._get_responses.items():
+            if url.startswith(prefix):
+                return response
+        return MockNoteApiResponse(ok=False, status=404)
+
+    def post(self, url, data=None):
+        self.posted_urls.append(url)
+        return MockNoteApiResponse(ok=self._post_ok)
+
+    def delete(self, url, data=None):
+        self.deleted_urls.append(url)
+        return MockNoteApiResponse(ok=self._delete_ok)
+
+
+class MockNoteRequest:
+    def __init__(self, api_context):
+        self._api_context = api_context
+
+    def new_context(self, storage_state=None):
+        return self._api_context
+
+
+class MockPlaywrightForNotes:
+    """Notes never need a browser page — only the API request context."""
+
+    def __init__(self, api_context):
+        self.request = MockNoteRequest(api_context)
+
+
+_NOTE_URL = "https://substack.com/@nathanbaugh/note/c-300984381"
+_COMMENT_ENDPOINT = "https://substack.com/api/v1/reader/comment/300984381"
+
+
+def _comment_item(**overrides) -> dict:
+    comment = {
+        "id": 300984381,
+        "name": "Nathan Baugh",
+        "handle": "nathanbaugh",
+        "user_id": 12345,
+        "body": "Steinbeck's writing advice",
+        "body_json": None,
+        "date": "2026-07-24T16:44:59.938Z",
+    }
+    comment.update(overrides)
+    return {"item": {"comment": comment}}
+
+
+def test_save_note_impl_confirmed(tmp_path: Path):
+    client = _client(tmp_path)
+    api_context = MockNoteApiRequestContext(
+        get_responses={
+            _COMMENT_ENDPOINT: MockNoteApiResponse(json_data=_comment_item())
+        },
+        post_ok=True,
+    )
+    pw = MockPlaywrightForNotes(api_context)
+
+    note, confirmation = client._save_note_impl(url=_NOTE_URL, playwright_instance=pw)
+    assert confirmation == "confirmed"
+    assert note.substack_note_id == "300984381"
+    assert note.author_handle == "nathanbaugh"
+    assert note.body_text == "Steinbeck's writing advice"
+    assert api_context.posted_urls == [
+        "https://substack.com/api/v1/note/c-300984381/save"
+    ]
+
+
+def test_save_note_impl_unconfirmed(tmp_path: Path):
+    client = _client(tmp_path)
+    api_context = MockNoteApiRequestContext(
+        get_responses={
+            _COMMENT_ENDPOINT: MockNoteApiResponse(json_data=_comment_item())
+        },
+        post_ok=False,
+    )
+    pw = MockPlaywrightForNotes(api_context)
+
+    _, confirmation = client._save_note_impl(url=_NOTE_URL, playwright_instance=pw)
+    assert confirmation == "unconfirmed"
+
+
+def test_save_note_impl_rejects_url_without_note_id(tmp_path: Path):
+    client = _client(tmp_path)
+    pw = MockPlaywrightForNotes(MockNoteApiRequestContext())
+    with pytest.raises(SubstackClientError):
+        client._save_note_impl(
+            url="https://substack.com/not-a-note-url", playwright_instance=pw
+        )
+
+
+def test_unsave_note_impl_confirmed_via_api(tmp_path: Path):
+    client = _client(tmp_path)
+    api_context = MockNoteApiRequestContext(delete_ok=True)
+    pw = MockPlaywrightForNotes(api_context)
+
+    status = client._unsave_note_impl(url=_NOTE_URL, playwright_instance=pw)
+    assert status == "confirmed"
+    assert api_context.deleted_urls == [
+        "https://substack.com/api/v1/note/c-300984381/save"
+    ]
+
+
+def test_unsave_note_impl_without_id_returns_not_found(tmp_path: Path):
+    """Proves the no-DOM-fallback decision: with no extractable note id, the
+    call returns 'not_found' rather than attempting a DOM click."""
+    client = _client(tmp_path)
+    pw = MockPlaywrightForNotes(MockNoteApiRequestContext())
+
+    status = client._unsave_note_impl(
+        url="https://substack.com/not-a-note-url", playwright_instance=pw
+    )
+    assert status == "not_found"
+
+
+def test_fetch_note_content_impl_returns_body_and_format(tmp_path: Path):
+    client = _client(tmp_path)
+    api_context = MockNoteApiRequestContext(
+        get_responses={
+            _COMMENT_ENDPOINT: MockNoteApiResponse(json_data=_comment_item())
+        }
+    )
+    pw = MockPlaywrightForNotes(api_context)
+
+    result = client._fetch_note_content_impl(url=_NOTE_URL, playwright_instance=pw)
+    assert result["body_text"] == "Steinbeck's writing advice"
+    assert result["body_format"] == "text"
+    assert result["author_name"] == "Nathan Baugh"
+
+
+def test_reset_cache_clears_notes_caches(tmp_path: Path):
+    client = _client(tmp_path)
+    client._notes_api_cache = [{"comment": {"id": 1}}]
+    client._notes_api_failed = True
+
+    client.reset_cache()
+
+    assert client._notes_api_cache is None
+    assert client._notes_api_failed is False
+
+
+def test_fetch_saved_notes_page_slices_cache(tmp_path: Path):
+    client = _client(tmp_path)
+    items = [_comment_item(id=i)["item"] for i in range(1, 4)]
+    api_context = MockNoteApiRequestContext(
+        get_responses={
+            "https://substack.com/api/v1/reader/saved?filter=notes": MockNoteApiResponse(
+                json_data={"items": items, "nextCursor": None}
+            )
+        }
+    )
+    pw = MockPlaywrightForNotes(api_context)
+
+    page = client._fetch_saved_notes_page_impl(
+        limit=2, offset=0, playwright_instance=pw
+    )
+    assert len(page) == 2
+
+    page2 = client._fetch_saved_notes_page_impl(
+        limit=2, offset=2, playwright_instance=pw
+    )
+    assert len(page2) == 1
+
+
+def test_notes_api_unavailable_raises_clear_error(tmp_path: Path):
+    client = _client(tmp_path)
+    api_context = MockNoteApiRequestContext()  # every .get() returns 404
+    pw = MockPlaywrightForNotes(api_context)
+
+    with pytest.raises(SubstackClientError, match="inspect-network"):
+        client._fetch_saved_notes_page_impl(limit=10, offset=0, playwright_instance=pw)
+
+
+class MockReaderApiResponse:
+    """Reader-posts-API response double: status/ok/url/json(), like the notes one."""
+
+    def __init__(self, payload, status=200, ok=True):
+        self._payload = payload
+        self.status = status
+        self.ok = ok
+        self.url = "https://substack.com/api/v1/reader/posts"
+
+    def json(self):
+        return self._payload
+
+
+class MockReaderApiRequestContext:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def get(self, url):
+        return MockReaderApiResponse(self._payload)
+
+
+class MockPlaywrightForReaderApi:
+    """Only the API request context is needed for the reader-posts cache path."""
+
+    def __init__(self, api_context):
+        self.request = MockRequestForReaderApi(api_context)
+
+
+class MockRequestForReaderApi:
+    def __init__(self, api_context):
+        self._api_context = api_context
+
+    def new_context(self, storage_state=None):
+        return self._api_context
+
+
+def test_fetch_saved_posts_page_slices_cache(tmp_path: Path):
+    """Mirrors test_fetch_saved_notes_page_slices_cache: the caching/slicing
+    branch of _fetch_saved_posts_page_impl previously had no test coverage at
+    all because the method couldn't accept a Playwright double."""
+    client = _client(tmp_path)
+    payload = {
+        "posts": [
+            {
+                "id": i,
+                "canonical_url": f"https://pub.substack.com/p/post-{i}",
+                "title": f"Post {i}",
+                "saved_at": f"2026-01-0{i}T00:00:00Z",
+            }
+            for i in range(1, 4)
+        ],
+        "publications": [],
+        "more": False,
+    }
+    api_context = MockReaderApiRequestContext(payload)
+    pw = MockPlaywrightForReaderApi(api_context)
+
+    page = client._fetch_saved_posts_page_impl(
+        limit=2, offset=0, playwright_instance=pw
+    )
+    assert len(page) == 2
+
+    page2 = client._fetch_saved_posts_page_impl(
+        limit=2, offset=2, playwright_instance=pw
+    )
+    assert len(page2) == 1

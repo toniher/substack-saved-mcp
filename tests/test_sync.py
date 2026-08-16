@@ -4,18 +4,25 @@ from pathlib import Path
 from typing import Any
 
 from substack_saved_mcp.database import (
+    get_note,
     get_post,
     get_status,
     init_db,
+    list_notes,
     list_posts,
+    upsert_note,
     upsert_post,
 )
-from substack_saved_mcp.models import SavedPost
+from substack_saved_mcp.models import SavedNote, SavedPost
 from substack_saved_mcp.substack_client import (
     AuthRequiredError,
     SubstackSavedPostsClient,
 )
-from substack_saved_mcp.sync import sync_saved_posts
+from substack_saved_mcp.sync import (
+    parse_remote_note,
+    sync_saved_notes,
+    sync_saved_posts,
+)
 
 
 class MockSubstackClient(SubstackSavedPostsClient):
@@ -207,6 +214,209 @@ def test_incremental_sync_does_not_reconcile(tmp_path: Path):
         "https://pub1.substack.com/p/still-saved-elsewhere", db_path=db_path
     )
     assert other.is_saved == 1
+
+
+def _note_item(
+    note_id: int,
+    handle: str = "alice",
+    body: str = "hello world",
+    restacked_post: dict | None = None,
+    restacked_pub: dict | None = None,
+) -> dict:
+    """Build a note item matching the confirmed live shape of
+    GET /api/v1/reader/saved?filter=notes."""
+    return {
+        "entity_key": f"c-{note_id}",
+        "type": "comment",
+        "publication": restacked_pub,
+        "post": restacked_post,
+        "comment": {
+            "name": handle.capitalize(),
+            "handle": handle,
+            "id": note_id,
+            "body": body,
+            "body_json": None,
+            "user_id": 1000 + note_id,
+            "date": "2026-07-24T16:44:59.938Z",
+            "ancestor_path": "",
+            "reaction_count": 5,
+            "restacks": 2,
+            "children_count": 1,
+            "attachments": [],
+            "is_saved": True,
+        },
+    }
+
+
+def test_parse_remote_note_api_shape():
+    note = parse_remote_note(_note_item(300984381, handle="nathanbaugh"))
+    assert note is not None
+    assert note.substack_note_id == "300984381"
+    assert note.url == "https://substack.com/@nathanbaugh/note/c-300984381"
+    assert note.body_text == "hello world"
+    assert note.author_handle == "nathanbaugh"
+    assert note.is_restack == 0
+    assert note.saved_at is None
+    assert note.like_count == 5
+    assert note.restack_count == 2
+    assert note.reply_count == 1
+
+
+def test_parse_remote_note_restack():
+    item = _note_item(
+        1,
+        restacked_post={
+            "canonical_url": "https://pub.substack.com/p/some-post",
+            "title": "Some Post",
+        },
+        restacked_pub={"name": "Some Pub"},
+    )
+    note = parse_remote_note(item)
+    assert note is not None
+    assert note.is_restack == 1
+    assert note.restacked_post_url == "https://pub.substack.com/p/some-post"
+    assert note.restacked_post_title == "Some Post"
+    assert note.restacked_publication_name == "Some Pub"
+
+
+def test_parse_remote_note_missing_id_is_skipped():
+    item = _note_item(1)
+    item["comment"]["id"] = None
+    assert parse_remote_note(item) is None
+
+
+def test_parse_remote_note_saved_at_never_fabricated():
+    """Substack's saved-notes endpoint never exposes a bookmark timestamp;
+    saved_at must stay None rather than being stamped from the sync moment."""
+    note = parse_remote_note(_note_item(1))
+    assert note is not None
+    assert note.saved_at is None
+
+
+class MockNotesClient(SubstackSavedPostsClient):
+    """Mock client returning static test fixture note payloads."""
+
+    def __init__(self, pages: list[list[dict]], should_raise_auth: bool = False):
+        self.pages = pages
+        self.should_raise_auth = should_raise_auth
+
+    def fetch_saved_notes_page(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        if self.should_raise_auth:
+            raise AuthRequiredError("Session expired in mock.")
+        page_idx = offset // limit
+        if page_idx < len(self.pages):
+            return self.pages[page_idx]
+        return []
+
+
+def test_sync_saved_notes_success(tmp_path: Path):
+    db_path = tmp_path / "notes_sync_test.sqlite"
+    client = MockNotesClient(pages=[[_note_item(1), _note_item(2, handle="bob")]])
+    run = sync_saved_notes(force=True, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    assert run.entity == "note"
+    assert run.fetched_count == 2
+    assert run.upserted_count == 2
+
+    notes = list_notes(db_path=db_path)
+    assert len(notes) == 2
+
+
+def test_sync_saved_notes_auth_required(tmp_path: Path):
+    db_path = tmp_path / "notes_auth_test.sqlite"
+    client = MockNotesClient(pages=[], should_raise_auth=True)
+
+    run = sync_saved_notes(force=False, db_path=db_path, client=client)
+    assert run.status == "auth_required"
+    assert run.entity == "note"
+
+    st = get_status(db_path)
+    assert st.last_note_sync_status == "auth_required"
+    # The posts side must stay untouched by a notes-only sync.
+    assert st.last_sync_status is None
+
+
+def test_sync_notes_records_entity_note(tmp_path: Path):
+    db_path = tmp_path / "notes_entity_test.sqlite"
+    client = MockNotesClient(pages=[[_note_item(1)]])
+    sync_saved_notes(force=True, db_path=db_path, client=client)
+
+    st = get_status(db_path)
+    assert st.last_note_sync_status == "success"
+    assert st.last_sync_status is None  # posts sync_runs are untouched
+
+
+def test_sync_notes_force_reconciles(tmp_path: Path):
+    """A note no longer present in the complete remote saved list must be
+    soft-deleted by a force/full sync."""
+    db_path = tmp_path / "notes_reconcile_test.sqlite"
+    init_db(db_path)
+
+    stale = SavedNote(
+        substack_note_id="999",
+        url="https://substack.com/@stale/note/c-999",
+        body_text="stale note",
+        is_saved=1,
+    )
+    upsert_note(stale, db_path=db_path)
+
+    client = MockNotesClient(pages=[[_note_item(1)]])
+    run = sync_saved_notes(force=True, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    assert run.reconciled_count == 1
+
+    stale_after = get_note("https://substack.com/@stale/note/c-999", db_path=db_path)
+    assert stale_after.is_saved == 0
+    assert stale_after.unsaved_at is not None
+
+    notes = list_notes(db_path=db_path)
+    assert len(notes) == 1
+
+
+def test_sync_notes_incremental_never_reconciles(tmp_path: Path):
+    db_path = tmp_path / "notes_no_reconcile_test.sqlite"
+    init_db(db_path)
+
+    other = SavedNote(
+        substack_note_id="999",
+        url="https://substack.com/@other/note/c-999",
+        body_text="still saved elsewhere",
+        is_saved=1,
+    )
+    upsert_note(other, db_path=db_path)
+
+    client = MockNotesClient(pages=[[_note_item(1)]])
+    run = sync_saved_notes(force=False, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    assert run.reconciled_count == 0
+
+    other_after = get_note("https://substack.com/@other/note/c-999", db_path=db_path)
+    assert other_after.is_saved == 1
+
+
+def test_sync_notes_incremental_early_stop(tmp_path: Path):
+    """Three consecutive already-saved notes must stop the incremental loop
+    before reaching further pages."""
+    db_path = tmp_path / "notes_early_stop_test.sqlite"
+    init_db(db_path)
+
+    for i in range(1, 4):
+        upsert_note(
+            parse_remote_note(_note_item(i, handle=f"handle{i}")), db_path=db_path
+        )
+
+    page1 = [_note_item(i, handle=f"handle{i}") for i in range(1, 4)] + [
+        _note_item(4, handle="newcomer")
+    ]
+    client = MockNotesClient(pages=[page1])
+    run = sync_saved_notes(force=False, db_path=db_path, client=client)
+
+    assert run.status == "success"
+    # Stops after 3 consecutive matches, before reaching the 4th (new) note.
+    assert get_note("https://substack.com/@newcomer/note/c-4", db_path=db_path) is None
 
 
 def test_dom_scrolling_mock(tmp_path: Path):

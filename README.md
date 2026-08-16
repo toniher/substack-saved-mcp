@@ -1,17 +1,18 @@
-# Substack Saved Posts MCP & CLI
+# Substack Saved Posts & Notes MCP & CLI
 
 [![PyPI version](https://img.shields.io/pypi/v/substack-saved-mcp.svg)](https://pypi.org/project/substack-saved-mcp/)
 
-A local, stdio-based Model Context Protocol (MCP) server and sync engine for your saved/bookmarked Substack posts.
+A local, stdio-based Model Context Protocol (MCP) server and sync engine for your saved/bookmarked Substack **posts and notes**.
 
 ## Features
 
 - **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, and publications. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`). Search also covers a post's **full body text**, but only for posts whose content has already been fetched once via `get-content` / the `get_post_content` tool — a normal `sync` stores metadata and excerpts, not full bodies, so posts you haven't opened yet are matched on their title/excerpt/metadata only, not their full text.
-- **Full Content for LLMs**: Fetch a saved post's full content and get it back cleaned and formatted (headings, lists, links) for feeding directly to an LLM, with the result cached locally for next time.
-- **Save & Unsave**: Bookmark new Substack posts or unbookmark existing ones via authenticated browser sessions.
+- **Saved Notes, too**: Substack's short-form notes are synced, searched, and cached separately from posts (they carry an author and body rather than a title or publication tier). Full-text search covers note bodies, authors, and restacked-post titles. Notes never require a browser at all — every notes operation (sync, save, unsave, full-content fetch) is a plain authenticated API call.
+- **Full Content for LLMs**: Fetch a saved post's or note's full content and get it back cleaned and formatted (headings, lists, links) for feeding directly to an LLM, with the result cached locally for next time.
+- **Save & Unsave**: Bookmark new Substack posts and notes, or unbookmark existing ones. Posts go through an authenticated browser session; notes are API-only.
 - **Offline First**: Fast, offline queries directly from local SQLite cache.
 - **Privacy & Security**: Keeps session credentials local, redacting tokens from logs.
-- **FastMCP Protocol**: Stdio MCP interface with rich tool suite and resources.
+- **FastMCP Protocol**: Stdio MCP interface with rich tool suite and resources for both posts and notes.
 
 ---
 
@@ -88,8 +89,12 @@ substack-saved-mcp init
 # 2. Authenticate with Substack (opens interactive browser window once)
 substack-saved-mcp login
 
-# 3. Sync saved posts into local cache
+# 3. Sync saved posts AND notes into local cache (both entities by default)
 substack-saved-mcp sync
+
+# 3b. Or sync just one entity
+substack-saved-mcp sync --only posts
+substack-saved-mcp sync --only notes
 
 # 4. Search saved posts via CLI
 substack-saved-mcp search "artificial intelligence"
@@ -106,7 +111,18 @@ substack-saved-mcp unsave "https://example.substack.com/p/post-slug"
 # 6. Get a saved post's full content, cleaned up and ready for an LLM
 substack-saved-mcp get-content "https://example.substack.com/p/post-slug"
 
-# 7. Launch stdio MCP server
+# 7. Work with saved notes the same way
+substack-saved-mcp list-notes --limit 10
+substack-saved-mcp search-notes "kubernetes" --author alice
+substack-saved-mcp note-authors
+substack-saved-mcp save-note "https://substack.com/@handle/note/c-123456"
+substack-saved-mcp unsave-note "https://substack.com/@handle/note/c-123456"
+substack-saved-mcp get-note "https://substack.com/@handle/note/c-123456"
+
+# 8. Check combined status (posts and notes counts, last sync per entity)
+substack-saved-mcp status
+
+# 9. Launch stdio MCP server
 substack-saved-mcp serve
 ```
 
@@ -172,10 +188,12 @@ export SUBSTACK_SAVED_DATA_DIR="/path/to/my/data_dir"
 
 **No, a visible browser window will not open during normal MCP operations.**
 
-- **Read & Search Tools** (`search_saved_posts`, `list_saved_posts`, `get_saved_post`, `list_publications`, `saved_posts_status`):  
+- **Read & Search Tools** (`search_saved_posts`, `list_saved_posts`, `get_saved_post`, `search_saved_notes`, `list_saved_notes`, `get_saved_note`, `list_publications`, `list_audiences`, `saved_posts_status`):  
   Operate 100% offline using the local SQLite database. Zero browser activity.
-- **Sync & Write Tools** (`sync_saved_posts`, `save_post`, `unsave_post`, `get_post_content`):  
+- **Post Sync & Write Tools** (`sync_saved_posts`, `save_post`, `unsave_post`, `get_post_content`):  
   Run in **headless background mode** using the pre-authenticated session stored in `storage_state.json`.
+- **Note Sync & Write Tools** (`sync_saved_notes`, `save_note`, `unsave_note`, `get_note_content`):  
+  Never open a browser page at all, headless or otherwise — Substack's notes endpoints are plain authenticated HTTP calls, so these tools only ever make direct API requests using `storage_state.json`.
 - **Interactive Login**:  
   A visible browser window opens **only** when you manually run `substack-saved-mcp login` from your terminal. If your session expires while using an MCP client, the tool will return a clear error message instructing you to re-authenticate via `substack-saved-mcp login` instead of popping open a browser window unexpectedly.
 
