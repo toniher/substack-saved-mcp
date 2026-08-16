@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import click
 
+from substack_saved_mcp import __version__
 from substack_saved_mcp.config import get_storage_state_path
 from substack_saved_mcp.content_utils import (
     format_note_for_llm,
@@ -61,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 def cli() -> None:
     """Substack Saved Posts MCP & Sync Engine."""
     pass
