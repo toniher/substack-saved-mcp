@@ -21,6 +21,8 @@ uv sync --extra dev
 
 `ruff` is configured in `pyproject.toml` (rules: `E4`, `E7`, `E9`, `F`, `I`, `UP`, `B`, `RUF`, line length 88, target py311). Lint with `uvx ruff check .` or `uv run ruff check .`.
 
+After any change to dependencies or tracked files, run `uv lock` to keep `uv.lock` current, then `prek run --all-files` (using the repo's `.pre-commit-config.yaml`) before considering the work done.
+
 ## Architecture
 
 - `cli.py` is the Click entry point (`substack-saved-mcp`). Its commands initialize the database and then delegate to the repository, sync engine, Playwright client, or MCP server.
