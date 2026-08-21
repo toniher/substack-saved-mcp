@@ -97,6 +97,43 @@ def test_cli_audience_filter_and_command(setup_cli_db):
     assert "only_paid" in res_audiences.output
 
 
+def test_cli_read_state_filter_and_progress_display(setup_cli_db):
+    upsert_post(
+        SavedPost(
+            url="https://cli.substack.com/p/unread-post",
+            title="Unread Post",
+            publication_name="CLI Times",
+            is_saved=1,
+        ),
+        setup_cli_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://cli.substack.com/p/finished-post",
+            title="Finished Post",
+            publication_name="CLI Times",
+            word_count=1000,
+            max_read_progress=0.99,
+            is_viewed=1,
+            is_saved=1,
+        ),
+        setup_cli_db,
+    )
+
+    runner = CliRunner()
+
+    res_filtered = runner.invoke(cli, ["list", "--read-state", "finished"])
+    assert res_filtered.exit_code == 0
+    assert "Finished Post" in res_filtered.output
+    assert "Unread Post" not in res_filtered.output
+    assert "99% (finished)" in res_filtered.output
+
+    res_search = runner.invoke(cli, ["search", "cli", "--read-state", "finished"])
+    assert res_search.exit_code == 0
+    assert "Finished Post" in res_search.output
+    assert "Progress    : 99% (finished)" in res_search.output
+
+
 def test_cli_get_content_fetches_and_caches(setup_cli_db):
     upsert_post(
         SavedPost(

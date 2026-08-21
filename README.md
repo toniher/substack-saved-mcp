@@ -6,7 +6,8 @@ A local, stdio-based Model Context Protocol (MCP) server and sync engine for you
 
 ## Features
 
-- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, and publications. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), and date ranges (`published_at` vs `saved_at`). Search also covers a post's **full body text**, but only for posts whose content has already been fetched once via `get-content` / the `get_post_content` tool — a normal `sync` stores metadata and excerpts, not full bodies, so posts you haven't opened yet are matched on their title/excerpt/metadata only, not their full text.
+- **Read & Search**: Full-text search (SQLite FTS5) across saved post titles, excerpts, authors, and publications. Filter by publication, audience tier (e.g. `everyone`, `only_paid`), reading progress (`--read-state unread`/`in_progress`/`finished`/`started`), and date ranges (`published_at` vs `saved_at`). Search also covers a post's **full body text**, but only for posts whose content has already been fetched once via `get-content` / the `get_post_content` tool — a normal `sync` stores metadata and excerpts, not full bodies, so posts you haven't opened yet are matched on their title/excerpt/metadata only, not their full text.
+- **Reading Progress**: Substack tracks how far you've read each saved post (visible in its mobile apps, not the web UI) — this tool surfaces it. Each post reports `is_fully_read` and `minutes_remaining`, derived from the stored `max_read_progress` high-water mark at a configurable threshold (default 0.95, `SUBSTACK_SAVED_FULLY_READ_THRESHOLD`). Filter with `--read-state`, or sort a list by `read_progress`/`minutes_remaining` to find something short to finish. Progress refreshes on every sync a post is touched by; run `sync --force` to refresh it for your whole backlog.
 - **Saved Notes, too**: Substack's short-form notes are synced, searched, and cached separately from posts (they carry an author and body rather than a title or publication tier). Full-text search covers note bodies, authors, and restacked-post titles. Notes never require a browser at all — every notes operation (sync, save, unsave, full-content fetch) is a plain authenticated API call.
 - **Full Content for LLMs**: Fetch a saved post's or note's full content and get it back cleaned and formatted (headings, lists, links) for feeding directly to an LLM, with the result cached locally for next time.
 - **Save & Unsave**: Bookmark new Substack posts and notes, or unbookmark existing ones. Posts go through an authenticated browser session; notes are API-only.
@@ -103,6 +104,11 @@ substack-saved-mcp search "artificial intelligence"
 substack-saved-mcp audiences
 substack-saved-mcp list --audience only_paid
 substack-saved-mcp search "artificial intelligence" --audience everyone
+
+# 4c. Filter or sort by reading progress
+substack-saved-mcp list --read-state finished
+substack-saved-mcp list --read-state in_progress --sort-by minutes_remaining
+substack-saved-mcp search "artificial intelligence" --read-state unread
 
 # 5. Save or unsave a post
 substack-saved-mcp save "https://example.substack.com/p/post-slug"
@@ -206,6 +212,19 @@ no longer in the remote list) is automatically skipped for that run, so a post
 or note that merely couldn't be fetched is never mistaken for one you actually
 unsaved on Substack. Just run `sync` again later — a subsequent successful run
 picks up anything that was missed.
+
+### How is "fully read" determined, and how fresh is it?
+
+Substack reports a `max_read_progress` high-water mark (0.0–1.0) per saved post; a
+post counts as fully read once that crosses a threshold (default `0.95` — real
+posts top out around `0.98`–`0.9999` rather than an exact `1.0`). Override it with:
+```bash
+export SUBSTACK_SAVED_FULLY_READ_THRESHOLD="0.90"
+```
+Progress is refreshed whenever a post is re-fetched during sync. An incremental
+sync only touches recently-saved posts, so progress on older posts in your
+backlog can go stale between reads; run `substack-saved-mcp sync --force` to
+refresh it for everything. Notes have no reading-progress concept.
 
 ### Will a browser window pop up when running as an MCP server?
 

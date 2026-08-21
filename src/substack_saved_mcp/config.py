@@ -17,6 +17,24 @@ def get_saved_posts_source() -> str:
     return value if value in _SAVED_POSTS_SOURCES else "auto"
 
 
+_DEFAULT_FULLY_READ_THRESHOLD = 0.95
+
+
+def get_fully_read_threshold() -> float:
+    """Return the max_read_progress fraction at or above which a post counts as
+    fully read. Defaults to 0.95, overridable via SUBSTACK_SAVED_FULLY_READ_THRESHOLD.
+    Falls back to the default on an unparseable or out-of-(0, 1] value, since a typo
+    here shouldn't break every read-state classification."""
+    raw = os.getenv("SUBSTACK_SAVED_FULLY_READ_THRESHOLD")
+    if not raw:
+        return _DEFAULT_FULLY_READ_THRESHOLD
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_FULLY_READ_THRESHOLD
+    return value if 0 < value <= 1 else _DEFAULT_FULLY_READ_THRESHOLD
+
+
 def get_default_data_dir() -> Path:
     """Return OS-appropriate application data directory."""
     if env_dir := os.getenv("SUBSTACK_SAVED_DATA_DIR"):

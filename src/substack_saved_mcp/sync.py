@@ -60,6 +60,18 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _float_or_none(value: Any) -> float | None:
+    """Coerce a value to float, tolerating 0.0, and clamp into [0.0, 1.0] since this
+    is only ever used for read-progress fractions."""
+    if value is None:
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, n))
+
+
 def _build_sync_run(
     sync_id: int,
     status: str,
@@ -165,6 +177,15 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
         else None  # ceil division, min 1
     )
 
+    # Reading progress. Confirmed live to sit on the post object in both the
+    # unified and legacy payloads, so unlike saved_at no dual-level lookup is
+    # needed. DOM cards never carry this, so the early-return branch above
+    # leaves all three as their model defaults (None/None/0), which reads as
+    # "unread" rather than fabricating a false zero.
+    read_progress = _float_or_none(post_obj.get("read_progress"))
+    max_read_progress = _float_or_none(post_obj.get("max_read_progress"))
+    is_viewed = 1 if post_obj.get("is_viewed") else 0
+
     return SavedPost(
         substack_post_id=substack_id,
         url=clean_url,
@@ -182,6 +203,9 @@ def parse_remote_post(raw_data: dict[str, Any]) -> SavedPost:
         is_paywalled=is_paywalled,
         word_count=word_count,
         reading_time_minutes=reading_time_minutes,
+        read_progress=read_progress,
+        max_read_progress=max_read_progress,
+        is_viewed=is_viewed,
     )
 
 
@@ -328,8 +352,8 @@ def sync_saved_posts(
             error_message=msg,
         )
     except Exception as e:
-        msg = f"Sync failed: {e!s}"
-        logger.exception(msg)
+        msg = str(e)
+        logger.exception(f"Sync failed: {msg}")
         finish_sync_run(
             sync_id=sync_id,
             status="failed",
@@ -582,8 +606,8 @@ def sync_saved_notes(
             error_message=msg,
         )
     except Exception as e:
-        msg = f"Sync failed: {e!s}"
-        logger.exception(msg)
+        msg = str(e)
+        logger.exception(f"Sync failed: {msg}")
         finish_sync_run(
             sync_id=sync_id,
             status="failed",

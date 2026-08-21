@@ -1,12 +1,13 @@
 """SQLite database schema, FTS5 virtual table indexing, and query repository."""
 
+import math
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from substack_saved_mcp.config import get_db_path
+from substack_saved_mcp.config import get_db_path, get_fully_read_threshold
 from substack_saved_mcp.models import (
     AudienceSummary,
     NoteAuthorSummary,
@@ -19,7 +20,50 @@ from substack_saved_mcp.models import (
 )
 from substack_saved_mcp.url_utils import canonicalize_url
 
+WORDS_PER_MINUTE = 200  # kept in sync with sync.py's constant of the same name
+
 _NOTE_SORT_COLUMNS = {"saved_at": "saved_at", "posted_at": "posted_at"}
+
+_POST_SORT_COLUMNS = {
+    "saved_at": "saved_at",
+    "published_at": "published_at",
+    "read_progress": "read_progress",
+    "minutes_remaining": (
+        "COALESCE(word_count, 0) * (1 - COALESCE(max_read_progress, 0))"
+    ),
+}
+
+_READ_STATE_PREDICATES = {
+    "unread": "COALESCE({p}is_viewed, 0) = 0 AND COALESCE({p}max_read_progress, 0) = 0",
+    "in_progress": (
+        "COALESCE({p}max_read_progress, 0) > 0 "
+        "AND COALESCE({p}max_read_progress, 0) < ?"
+    ),
+    "finished": "COALESCE({p}max_read_progress, 0) >= ?",
+    "started": (
+        "COALESCE({p}max_read_progress, 0) > 0 OR COALESCE({p}is_viewed, 0) = 1"
+    ),
+}
+
+
+def _read_state_clause(
+    read_state: str, column_prefix: str = ""
+) -> tuple[str, list[float]]:
+    """Build a (clause, params) pair classifying posts into one of four read
+    states, resolved against the raw read_progress columns rather than a
+    stored derivative. COALESCE is load-bearing: a NULL max_read_progress
+    (pre-migration rows, or DOM-sourced posts that never carry progress) must
+    read as unread, not silently vanish from every filter."""
+    template = _READ_STATE_PREDICATES.get(read_state)
+    if template is None:
+        allowed = ", ".join(sorted(_READ_STATE_PREDICATES))
+        raise ValueError(
+            f"Unknown read_state {read_state!r}; expected one of: {allowed}"
+        )
+    clause = template.format(p=column_prefix)
+    threshold = get_fully_read_threshold()
+    params = [threshold] if "?" in clause else []
+    return clause, params
 
 
 @contextmanager
@@ -61,6 +105,14 @@ def init_db(db_path: Path | None = None) -> None:
             existing_cols = {row["name"] for row in cursor.fetchall()}
             if "audience" not in existing_cols:
                 conn.execute("ALTER TABLE posts ADD COLUMN audience TEXT")
+            if "read_progress" not in existing_cols:
+                conn.execute("ALTER TABLE posts ADD COLUMN read_progress REAL")
+            if "max_read_progress" not in existing_cols:
+                conn.execute("ALTER TABLE posts ADD COLUMN max_read_progress REAL")
+            if "is_viewed" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE posts ADD COLUMN is_viewed INTEGER NOT NULL DEFAULT 0"
+                )
 
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS posts (
@@ -82,6 +134,9 @@ def init_db(db_path: Path | None = None) -> None:
                 is_paywalled INTEGER DEFAULT 0,
                 reading_time_minutes INTEGER,
                 word_count INTEGER,
+                read_progress REAL,
+                max_read_progress REAL,
+                is_viewed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -92,6 +147,7 @@ def init_db(db_path: Path | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_posts_is_saved ON posts(is_saved);
             CREATE INDEX IF NOT EXISTS idx_posts_publication ON posts(publication_name);
             CREATE INDEX IF NOT EXISTS idx_posts_audience ON posts(audience);
+            CREATE INDEX IF NOT EXISTS idx_posts_max_read_progress ON posts(max_read_progress);
 
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +328,23 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
             existing["reading_time_minutes"] if existing else None
         )
         word_count = post.word_count or (existing["word_count"] if existing else None)
+        # Explicit is-not-None checks (not `or`): a real 0.0 is falsy and would
+        # otherwise be silently discarded in favor of a stale stored value.
+        read_progress = (
+            post.read_progress
+            if post.read_progress is not None
+            else (existing["read_progress"] if existing else None)
+        )
+        max_read_progress = (
+            post.max_read_progress
+            if post.max_read_progress is not None
+            else (existing["max_read_progress"] if existing else None)
+        )
+        is_viewed = (
+            post.is_viewed
+            if post.is_viewed
+            else (existing["is_viewed"] if existing else 0)
+        )
 
         if existing:
             cursor.execute(
@@ -281,7 +354,8 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
                     publication_url = ?, author_name = ?, published_at = ?, saved_at = ?,
                     unsaved_at = ?, is_saved = ?, excerpt = ?, content_text = ?,
                     image_url = ?, audience = ?, is_paywalled = ?, reading_time_minutes = ?,
-                    word_count = ?, updated_at = ?
+                    word_count = ?, read_progress = ?, max_read_progress = ?, is_viewed = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -302,6 +376,9 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
                     post.is_paywalled,
                     reading_time_minutes,
                     word_count,
+                    read_progress,
+                    max_read_progress,
+                    is_viewed,
                     now_iso,
                     existing["id"],
                 ),
@@ -314,8 +391,9 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
                     substack_post_id, url, title, publication_name, publication_url,
                     author_name, published_at, saved_at, unsaved_at, is_saved,
                     excerpt, content_text, image_url, audience, is_paywalled, reading_time_minutes,
-                    word_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    word_count, read_progress, max_read_progress, is_viewed,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     substack_post_id,
@@ -335,6 +413,9 @@ def upsert_post(post: SavedPost, db_path: Path | None = None) -> SavedPost:
                     post.is_paywalled,
                     reading_time_minutes,
                     word_count,
+                    read_progress,
+                    max_read_progress,
+                    is_viewed,
                     created_at,
                     now_iso,
                 ),
@@ -434,14 +515,15 @@ def list_posts(
     offset: int = 0,
     publication: str | None = None,
     audience: str | None = None,
+    read_state: str | None = None,
     sort_by: str = "saved_at",
     is_saved_only: bool = True,
     db_path: Path | None = None,
 ) -> list[PostSummary]:
-    """List posts with pagination, publication/audience filters, and sorting."""
-    order_col = "published_at" if sort_by == "published_at" else "saved_at"
+    """List posts with pagination, publication/audience/read_state filters, and sorting."""
+    order_col = _POST_SORT_COLUMNS.get(sort_by, "saved_at")
     where_clauses = []
-    params: list[str | int] = []
+    params: list[str | int | float] = []
 
     if is_saved_only:
         where_clauses.append("is_saved = 1")
@@ -451,12 +533,16 @@ def list_posts(
     if audience:
         where_clauses.append("LOWER(audience) = LOWER(?)")
         params.append(audience)
+    if read_state:
+        clause, read_state_params = _read_state_clause(read_state)
+        where_clauses.append(clause)
+        params.extend(read_state_params)
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     sql = f"""
         SELECT id, substack_post_id, url, title, publication_name, author_name,
                published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
-               reading_time_minutes, word_count
+               reading_time_minutes, word_count, read_progress, max_read_progress, is_viewed
         FROM posts
         {where_sql}
         ORDER BY {order_col} DESC NULLS LAST
@@ -478,13 +564,14 @@ def _post_search_filters(
     saved_after: str | None,
     saved_before: str | None,
     is_saved_only: bool,
+    read_state: str | None = None,
     column_prefix: str = "",
-) -> tuple[list[str], list[str | int]]:
+) -> tuple[list[str], list[str | int | float]]:
     """Build shared WHERE clauses/params for search_posts, used by both the FTS
     branch and the LIKE fallback so a malformed FTS query never silently drops
     filters (the bug the notes search code was built to avoid from the start)."""
     where_clauses = []
-    params: list[str | int] = []
+    params: list[str | int | float] = []
 
     if is_saved_only:
         where_clauses.append(f"{column_prefix}is_saved = 1")
@@ -506,6 +593,10 @@ def _post_search_filters(
     if saved_before:
         where_clauses.append(f"{column_prefix}saved_at <= ?")
         params.append(saved_before)
+    if read_state:
+        clause, read_state_params = _read_state_clause(read_state, column_prefix)
+        where_clauses.append(clause)
+        params.extend(read_state_params)
 
     return where_clauses, params
 
@@ -518,6 +609,7 @@ def search_posts(
     published_before: str | None = None,
     saved_after: str | None = None,
     saved_before: str | None = None,
+    read_state: str | None = None,
     limit: int = 20,
     is_saved_only: bool = True,
     db_path: Path | None = None,
@@ -531,15 +623,16 @@ def search_posts(
         saved_after,
         saved_before,
         is_saved_only,
+        read_state,
         column_prefix="p.",
     )
     where_clauses = ["posts_fts MATCH ?", *filter_clauses]
-    params: list[str | int] = [query, *filter_params]
+    params: list[str | int | float] = [query, *filter_params]
 
     sql = f"""
         SELECT p.id, p.substack_post_id, p.url, p.title, p.publication_name, p.author_name,
                p.published_at, p.saved_at, p.is_saved, p.excerpt, p.image_url, p.audience, p.is_paywalled,
-               p.reading_time_minutes, p.word_count
+               p.reading_time_minutes, p.word_count, p.read_progress, p.max_read_progress, p.is_viewed
         FROM posts_fts fts
         JOIN posts p ON fts.rowid = p.id
         WHERE {" AND ".join(where_clauses)}
@@ -556,7 +649,7 @@ def search_posts(
         except sqlite3.OperationalError:
             # Fallback to standard LIKE if FTS query syntax is special/malformed.
             # Reuses the same filter clauses as the FTS branch above so a
-            # malformed query never silently drops publication/audience/date filters.
+            # malformed query never silently drops publication/audience/date/read_state filters.
             like_query = f"%{query}%"
             fallback_clauses, fallback_params = _post_search_filters(
                 publication,
@@ -566,12 +659,13 @@ def search_posts(
                 saved_after,
                 saved_before,
                 is_saved_only,
+                read_state,
             )
             fallback_where = [
                 "(title LIKE ? OR excerpt LIKE ? OR publication_name LIKE ? OR author_name LIKE ?)",
                 *fallback_clauses,
             ]
-            params2: list[str | int] = [
+            params2: list[str | int | float] = [
                 like_query,
                 like_query,
                 like_query,
@@ -581,7 +675,7 @@ def search_posts(
             fallback_sql = f"""
                 SELECT id, substack_post_id, url, title, publication_name, author_name,
                        published_at, saved_at, is_saved, excerpt, image_url, audience, is_paywalled,
-                       reading_time_minutes, word_count
+                       reading_time_minutes, word_count, read_progress, max_read_progress, is_viewed
                 FROM posts
                 WHERE {" AND ".join(fallback_where)}
                 ORDER BY saved_at DESC
@@ -650,6 +744,37 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
         cursor.execute("SELECT COUNT(*) FROM notes WHERE is_saved = 0")
         total_unsaved_notes = cursor.fetchone()[0]
 
+        unread_clause, _ = _read_state_clause("unread")
+        in_progress_clause, in_progress_params = _read_state_clause("in_progress")
+        finished_clause, finished_params = _read_state_clause("finished")
+
+        cursor.execute(
+            f"SELECT COUNT(*) FROM posts WHERE is_saved = 1 AND {unread_clause}"
+        )
+        posts_unread = cursor.fetchone()[0]
+
+        cursor.execute(
+            f"SELECT COUNT(*) FROM posts WHERE is_saved = 1 AND {in_progress_clause}",
+            in_progress_params,
+        )
+        posts_in_progress = cursor.fetchone()[0]
+
+        cursor.execute(
+            f"SELECT COUNT(*) FROM posts WHERE is_saved = 1 AND {finished_clause}",
+            finished_params,
+        )
+        posts_fully_read = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT SUM(
+                COALESCE(word_count, 0) * (1 - COALESCE(max_read_progress, 0))
+            ) FROM posts WHERE is_saved = 1
+            """
+        )
+        remaining_words = cursor.fetchone()[0] or 0
+        minutes_remaining_total = math.ceil(remaining_words / WORDS_PER_MINUTE)
+
         cursor.execute("""
             SELECT completed_at, status FROM sync_runs
             WHERE status = 'success' AND entity = 'post'
@@ -692,6 +817,10 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
             total_unsaved_notes=total_unsaved_notes,
             last_successful_note_sync=last_note_success,
             last_note_sync_status=last_note_status,
+            posts_unread=posts_unread,
+            posts_in_progress=posts_in_progress,
+            posts_fully_read=posts_fully_read,
+            minutes_remaining_total=minutes_remaining_total,
             database_path=str(target_path),
         )
 

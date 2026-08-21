@@ -60,6 +60,7 @@ def search_saved_posts(
     published_before: str | None = None,
     saved_after: str | None = None,
     saved_before: str | None = None,
+    read_state: str | None = None,
     limit: int = 20,
 ) -> list[PostSummary]:
     """Perform full-text FTS5 search across cached saved posts.
@@ -67,7 +68,9 @@ def search_saved_posts(
     Searches title, excerpt, publication name, author, and content text.
     Allows filtering by publication name, audience tier (see list_audiences for
     cached values, e.g. "everyone", "only_paid"), original post date
-    (published_at), and saved date (saved_at).
+    (published_at), saved date (saved_at), and read_state ('unread',
+    'in_progress', 'finished', or 'started' — a post is 'finished' once its
+    high-water reading progress crosses a threshold, default 0.95).
     """
     init_db()
     return search_posts(
@@ -78,6 +81,7 @@ def search_saved_posts(
         published_before=published_before,
         saved_after=saved_after,
         saved_before=saved_before,
+        read_state=read_state,
         limit=limit,
     )
 
@@ -88,12 +92,16 @@ def list_saved_posts(
     offset: int = 0,
     publication: str | None = None,
     audience: str | None = None,
+    read_state: str | None = None,
     sort_by: str = "saved_at",
 ) -> list[PostSummary]:
     """List cached saved posts with pagination and optional publication/audience filters.
 
-    sort_by can be 'saved_at' (when post was bookmarked) or 'published_at' (when post was published).
+    sort_by can be 'saved_at', 'published_at', 'read_progress', or 'minutes_remaining'.
     audience filters by tier (see list_audiences for cached values, e.g. "everyone", "only_paid").
+    read_state filters by reading progress: 'unread', 'in_progress', 'finished',
+    or 'started' — a post is 'finished' once its high-water reading progress
+    crosses a threshold, default 0.95.
     """
     init_db()
     return list_posts(
@@ -101,6 +109,7 @@ def list_saved_posts(
         offset=offset,
         publication=publication,
         audience=audience,
+        read_state=read_state,
         sort_by=sort_by,
         is_saved_only=True,
     )

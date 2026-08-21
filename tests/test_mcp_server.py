@@ -99,6 +99,50 @@ def test_mcp_tools_flow(setup_test_db: Path):
     assert "Tech Insight" in pubs_res_str
 
 
+def test_mcp_read_state_filter_reaches_database(setup_test_db: Path):
+    upsert_post(
+        SavedPost(
+            url="https://tech.substack.com/p/unread",
+            title="Unread Post",
+            publication_name="Tech Insight",
+            excerpt="progress filter test",
+            is_saved=1,
+        ),
+        setup_test_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://tech.substack.com/p/finished",
+            title="Finished Post",
+            publication_name="Tech Insight",
+            excerpt="progress filter test",
+            word_count=1000,
+            max_read_progress=0.99,
+            is_viewed=1,
+            is_saved=1,
+        ),
+        setup_test_db,
+    )
+
+    listed = list_saved_posts(read_state="finished")
+    assert len(listed) == 1
+    assert listed[0].title == "Finished Post"
+    assert listed[0].is_fully_read is True
+    assert listed[0].minutes_remaining == 1  # ceil(1000 * 0.01 / 200)
+
+    searched = search_saved_posts(query="progress", read_state="unread")
+    assert len(searched) == 1
+    assert searched[0].title == "Unread Post"
+
+
+def test_mcp_read_state_invalid_value_raises(setup_test_db: Path):
+    with pytest.raises(ValueError):
+        list_saved_posts(read_state="bogus")
+
+    with pytest.raises(ValueError):
+        search_saved_posts(query="progress", read_state="bogus")
+
+
 def test_mcp_unsave_tool(setup_test_db: Path):
     p = SavedPost(
         url="https://test.substack.com/p/to-unsave",

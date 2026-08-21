@@ -118,6 +118,14 @@ def sync(force: bool, only: str | None) -> None:
         else:
             click.secho(f"Sync failed: {result.error_message}", fg="red")
 
+    if only is None:
+        # Fetching the full saved-posts list can itself trigger rate limiting
+        # that would otherwise make the very next request (the notes fetch)
+        # 429 through all its retries too - see the identical rationale on
+        # compare_saved_apis(). A brief pause here lets that limit cool down
+        # before the notes sync starts hammering the same reader API.
+        time.sleep(5)
+
     if only in (None, "notes"):
         click.echo("Starting Substack saved notes sync...")
         note_result = run_sync_notes(force=force)
@@ -287,6 +295,11 @@ def unsave_note(url_or_id: str) -> None:
 @click.option(
     "--saved-before", help="Only posts bookmarked on/before this ISO-8601 date."
 )
+@click.option(
+    "--read-state",
+    type=click.Choice(["unread", "in_progress", "finished", "started"]),
+    help="Filter by reading progress.",
+)
 @click.option("--limit", default=10, help="Maximum search results.")
 def search(
     query: str,
@@ -296,6 +309,7 @@ def search(
     published_before: str | None,
     saved_after: str | None,
     saved_before: str | None,
+    read_state: str | None,
     limit: int,
 ) -> None:
     """Perform full-text search across cached saved posts."""
@@ -308,6 +322,7 @@ def search(
         published_before=published_before,
         saved_after=saved_after,
         saved_before=saved_before,
+        read_state=read_state,
         limit=limit,
     )
     if not results:
@@ -326,6 +341,15 @@ def search(
             click.echo(
                 f"   Reading time: {p.reading_time_minutes or '?'} min ({p.word_count or '?'} words)"
             )
+        if p.max_read_progress is not None or p.is_viewed:
+            progress_pct = round((p.max_read_progress or 0.0) * 100)
+            status_word = "finished" if p.is_fully_read else "in progress"
+            remaining = (
+                f", {p.minutes_remaining} min left"
+                if p.minutes_remaining is not None and not p.is_fully_read
+                else ""
+            )
+            click.echo(f"   Progress    : {progress_pct}% ({status_word}{remaining})")
         click.echo(f"   URL         : {p.url}")
         if p.excerpt:
             click.echo(f"   Excerpt     : {p.excerpt[:120]}...")
@@ -343,10 +367,24 @@ def search(
     help="Filter by audience tier (e.g. everyone, only_paid). See 'audiences' command for cached values.",
 )
 @click.option(
-    "--sort-by", type=click.Choice(["saved_at", "published_at"]), default="saved_at"
+    "--read-state",
+    type=click.Choice(["unread", "in_progress", "finished", "started"]),
+    help="Filter by reading progress.",
+)
+@click.option(
+    "--sort-by",
+    type=click.Choice(
+        ["saved_at", "published_at", "read_progress", "minutes_remaining"]
+    ),
+    default="saved_at",
 )
 def list_cmd(
-    limit: int, offset: int, publication: str | None, audience: str | None, sort_by: str
+    limit: int,
+    offset: int,
+    publication: str | None,
+    audience: str | None,
+    read_state: str | None,
+    sort_by: str,
 ) -> None:
     """List saved posts ordered by saved date or publication date."""
     init_db()
@@ -355,6 +393,7 @@ def list_cmd(
         offset=offset,
         publication=publication,
         audience=audience,
+        read_state=read_state,
         sort_by=sort_by,
     )
     if not posts:
@@ -368,6 +407,10 @@ def list_cmd(
             if p.reading_time_minutes
             else ""
         )
+        if p.max_read_progress is not None or p.is_viewed:
+            progress_pct = round((p.max_read_progress or 0.0) * 100)
+            status_word = "finished" if p.is_fully_read else "in progress"
+            reading += f" | {progress_pct}% ({status_word})"
         click.secho(f"{idx}. {p.title}", fg="cyan")
         click.echo(
             f"   Pub: {p.publication_name} | Saved: {p.saved_at or 'N/A'} | Published: {p.published_at or 'N/A'} | Audience: {p.audience or 'N/A'}{reading}"
@@ -525,6 +568,10 @@ def status() -> None:
     click.echo(f"Unsaved Notes       : {st.total_unsaved_notes}")
     click.echo(f"Last Successful Note Sync: {st.last_successful_note_sync or 'Never'}")
     click.echo(f"Last Note Sync Status    : {st.last_note_sync_status or 'N/A'}")
+    click.echo(f"Posts Unread        : {st.posts_unread}")
+    click.echo(f"Posts In Progress   : {st.posts_in_progress}")
+    click.echo(f"Posts Fully Read    : {st.posts_fully_read}")
+    click.echo(f"Minutes Remaining   : {st.minutes_remaining_total}")
 
 
 @cli.command(name="get-content")
@@ -885,6 +932,9 @@ _UNIFIED_POST_FIELDS = (
     "wordcount",
     "word_count",
     "words",
+    "read_progress",
+    "max_read_progress",
+    "is_viewed",
 )
 
 

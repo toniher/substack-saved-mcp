@@ -132,3 +132,103 @@ def test_parse_remote_post_word_count_absent_leaves_fields_none():
     )
     assert post.word_count is None
     assert post.reading_time_minutes is None
+
+
+def test_parse_remote_post_maps_progress_from_legacy_flat_shape():
+    """Legacy /api/v1/reader/posts payloads carry progress on the flat item."""
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "read_progress": 0.42,
+            "max_read_progress": 0.55,
+            "is_viewed": True,
+        }
+    )
+    assert post.read_progress == 0.42
+    assert post.max_read_progress == 0.55
+    assert post.is_viewed == 1
+
+
+def test_parse_remote_post_maps_progress_from_unified_nested_shape():
+    """Unified /api/v1/reader/saved payloads nest progress under 'post'."""
+    post = parse_remote_post(
+        {
+            "post": {
+                "id": 1,
+                "canonical_url": "https://x.substack.com/p/a",
+                "read_progress": 0.1,
+                "max_read_progress": 0.99,
+                "is_viewed": True,
+            }
+        }
+    )
+    assert post.read_progress == 0.1
+    assert post.max_read_progress == 0.99
+    assert post.is_viewed == 1
+
+
+def test_parse_remote_post_progress_zero_preserved_not_none():
+    """A real 0.0 must survive, not collapse to None the way word_count's
+    _first_positive_int would (progress uses _float_or_none instead)."""
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "read_progress": 0.0,
+            "max_read_progress": 0.0,
+            "is_viewed": False,
+        }
+    )
+    assert post.read_progress == 0.0
+    assert post.max_read_progress == 0.0
+    assert post.is_viewed == 0
+
+
+def test_parse_remote_post_progress_absent_leaves_none():
+    """No progress fields at all -> both stay None, is_viewed defaults to 0."""
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+        }
+    )
+    assert post.read_progress is None
+    assert post.max_read_progress is None
+    assert post.is_viewed == 0
+
+
+def test_parse_remote_post_derives_minutes_remaining_from_max_read_progress():
+    """minutes_remaining is derived from max_read_progress, not read_progress."""
+    post = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "wordcount": 1000,
+            "read_progress": 0.1,
+            "max_read_progress": 0.5,
+        }
+    )
+    # ceil(1000 * (1 - 0.5) / 200) = 3
+    assert post.minutes_remaining == 3
+
+
+def test_parse_remote_post_is_fully_read_boundary():
+    """0.9822 crosses the 0.95 default threshold; 0.8833 doesn't."""
+    finished = parse_remote_post(
+        {
+            "id": 1,
+            "canonical_url": "https://x.substack.com/p/a",
+            "max_read_progress": 0.9822,
+        }
+    )
+    assert finished.is_fully_read is True
+
+    not_finished = parse_remote_post(
+        {
+            "id": 2,
+            "canonical_url": "https://x.substack.com/p/b",
+            "max_read_progress": 0.8833,
+        }
+    )
+    assert not_finished.is_fully_read is False

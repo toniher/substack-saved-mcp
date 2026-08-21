@@ -12,6 +12,7 @@ that settled them, what remains open, and the verification recipes worth re-runn
 | 0.2.0 — saved notes as a separate entity, end to end | Shipped |
 | 0.3.0 — unified reader API as the primary saved-posts source | Shipped |
 | Mid-pagination silent-truncation fix (`partial` sync status) | Shipped |
+| 0.4.0 — reading-progress tracking and `read_state` filtering for posts | Shipped |
 
 ---
 
@@ -137,10 +138,18 @@ insert/update/delete triggers. Never write to `posts_fts`/`notes_fts` directly.
 | `is_paywalled` | INTEGER | Derived from `audience == "only_paid"` |
 | `reading_time_minutes` | INTEGER | **Derived** from `word_count` (~200 wpm), never mapped |
 | `word_count` | INTEGER | From `wordcount` (confirmed live at 100% on the unified payload) |
+| `read_progress` | REAL | Current scroll position, 0.0–1.0; mapped from `post.read_progress` |
+| `max_read_progress` | REAL | High-water reading mark, 0.0–1.0; drives `is_fully_read`/`read_state` |
+| `is_viewed` | INTEGER | 1 = post was opened at least once (default 0) |
 | `created_at` / `updated_at` | TEXT | Local record timestamps |
 
+`is_fully_read` and `minutes_remaining` are **not columns** — they're Pydantic
+`@computed_field` properties on `SavedPost`/`PostSummary`, derived from `max_read_progress`
+(and `word_count`) at read time, same rationale as `reading_time_minutes`: a stored
+derivative would go stale the moment the threshold or WPM assumption changed.
+
 Indexes: `idx_posts_url`, `idx_posts_published_at DESC`, `idx_posts_saved_at DESC`,
-`idx_posts_is_saved`, `idx_posts_audience`.
+`idx_posts_is_saved`, `idx_posts_audience`, `idx_posts_max_read_progress`.
 `posts_fts` covers `title`, `publication_name`, `author_name`, `excerpt`, `content_text`.
 
 `metadata_json` ("raw sanitized source JSON for future migrations") was specified in the
@@ -282,6 +291,32 @@ The legacy cursor loop (`after=<ISO saved_at>` + `more` flag + controllable `pag
 the unified one (opaque `nextCursor`) are genuinely different pagination models; the parts
 worth sharing (`_reader_api_get()`, `_retry_after_seconds()`) were already factored out. A
 parameterized loop bent around two incompatible models would be worse than two honest loops.
+
+### Reading progress (0.4.0)
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| "Fully read" test | `max_read_progress >= 0.95`, overridable via `SUBSTACK_SAVED_FULLY_READ_THRESHOLD` | Real values like `0.9999`/`0.9867`/`0.9822` exist; an exact `1.0` test would call finished posts unfinished forever |
+| Driving field | `max_read_progress`, not `read_progress` | The high-water mark is "have I read this"; current position drops back on scroll-up. Both stored since they genuinely differ (5/72 sampled posts) |
+| Filter shape | `read_state` enum: `unread` / `in_progress` / `finished` / `started` | Self-documenting to an LLM caller; a numeric `--min-progress` param would leak the threshold convention |
+| `is_fully_read` / `minutes_remaining` | Derived (Pydantic `@computed_field`), never stored | Same rationale as `reading_time_minutes`; progress and the threshold both change, a stored derivative would go stale |
+| `is_viewed` | Stored as its own column | 14/72 sampled posts were opened but never scrolled — indistinguishable from "never opened" without it |
+| Staleness | Documented; `sync --force` refreshes everything | Progress changes without `saved_at` changing, and incremental sync's early-stop (`MAX_CONSECUTIVE_MATCHES = 3`) means older posts go stale between full syncs |
+| Notes | Out of scope | Confirmed absent from the notes payload; `SavedNote`'s docstring already records notes have no reading-time concept |
+
+Evidence: a live probe of a real account (72 saved posts, 6 pages of
+`GET /api/v1/reader/saved?filter=posts`) found `post.read_progress`/`post.max_read_progress`
+(floats 0.0–1.0) and `post.is_viewed` (bool) on 100% of items, identically mirrored under
+`post.inboxItem` (so no need to read that nested object), and present on the legacy
+`/api/v1/reader/posts?inboxType=saved` payload too — the same three-source `auto` chain in
+0.3.0 supplies them on both API sources; the DOM fallback does not. Distribution: 30 unstarted,
+30 in progress, 3 at 0.90–0.99, 9 at ≥1.0.
+
+`COALESCE(max_read_progress, 0)` in every `read_state` predicate is load-bearing, not
+defensive styling: after the additive migration every pre-existing row is `NULL`, and a bare
+`max_read_progress = 0` comparison evaluates to `NULL` (not true) in SQL — which would
+silently exclude the entire legacy cache from every read_state filter until a resync.
+`COALESCE` puts those rows (and DOM-sourced posts, which never carry progress) in `unread`.
 
 ---
 

@@ -1,6 +1,27 @@
 """Data models and Pydantic schemas for saved posts and sync metrics."""
 
-from pydantic import BaseModel
+import math
+
+from pydantic import BaseModel, computed_field
+
+from .config import get_fully_read_threshold
+
+WORDS_PER_MINUTE = 200  # kept in sync with sync.py's constant of the same name
+
+
+def _is_fully_read(max_read_progress: float | None) -> bool:
+    if max_read_progress is None:
+        return False
+    return max_read_progress >= get_fully_read_threshold()
+
+
+def _minutes_remaining(
+    word_count: int | None, max_read_progress: float | None
+) -> int | None:
+    if word_count is None:
+        return None
+    progress = max_read_progress or 0.0
+    return math.ceil(word_count * (1 - progress) / WORDS_PER_MINUTE)
 
 
 class SavedPost(BaseModel):
@@ -26,8 +47,21 @@ class SavedPost(BaseModel):
     is_paywalled: int = 0
     reading_time_minutes: int | None = None
     word_count: int | None = None
+    read_progress: float | None = None  # current scroll position, 0.0-1.0
+    max_read_progress: float | None = None  # high-water mark, 0.0-1.0
+    is_viewed: int = 0  # 1 = post was opened at least once
     created_at: str | None = None
     updated_at: str | None = None
+
+    @computed_field
+    @property
+    def is_fully_read(self) -> bool:
+        return _is_fully_read(self.max_read_progress)
+
+    @computed_field
+    @property
+    def minutes_remaining(self) -> int | None:
+        return _minutes_remaining(self.word_count, self.max_read_progress)
 
 
 class PostSummary(BaseModel):
@@ -48,6 +82,19 @@ class PostSummary(BaseModel):
     is_paywalled: int = 0
     reading_time_minutes: int | None = None
     word_count: int | None = None
+    read_progress: float | None = None
+    max_read_progress: float | None = None
+    is_viewed: int = 0
+
+    @computed_field
+    @property
+    def is_fully_read(self) -> bool:
+        return _is_fully_read(self.max_read_progress)
+
+    @computed_field
+    @property
+    def minutes_remaining(self) -> int | None:
+        return _minutes_remaining(self.word_count, self.max_read_progress)
 
 
 class PublicationSummary(BaseModel):
@@ -163,4 +210,8 @@ class SavedPostsStatus(BaseModel):
     total_unsaved_notes: int = 0
     last_successful_note_sync: str | None = None
     last_note_sync_status: str | None = None
+    posts_unread: int = 0
+    posts_in_progress: int = 0
+    posts_fully_read: int = 0
+    minutes_remaining_total: int = 0
     database_path: str

@@ -618,3 +618,293 @@ def test_init_db_idempotent_on_existing_notes_schema(temp_db: Path):
         temp_db,
     )
     assert len(list_notes(db_path=temp_db)) == 1
+
+
+def test_init_db_migrates_pre_progress_schema(tmp_path: Path):
+    """A DB created before the read-progress columns existed must not break
+    init_db (CREATE INDEX IF NOT EXISTS on a missing max_read_progress column
+    would raise), and its rows must classify as 'unread' rather than
+    vanishing from every read_state filter."""
+    import sqlite3
+
+    old_db_path = tmp_path / "pre_progress.sqlite"
+    conn = sqlite3.connect(str(old_db_path))
+    conn.execute("""
+        CREATE TABLE posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            substack_post_id TEXT UNIQUE,
+            url TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            publication_name TEXT NOT NULL,
+            publication_url TEXT,
+            author_name TEXT,
+            published_at TEXT,
+            saved_at TEXT,
+            unsaved_at TEXT,
+            is_saved INTEGER NOT NULL DEFAULT 1,
+            excerpt TEXT,
+            content_text TEXT,
+            image_url TEXT,
+            audience TEXT,
+            is_paywalled INTEGER DEFAULT 0,
+            reading_time_minutes INTEGER,
+            word_count INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO posts (url, title, publication_name, is_saved, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "https://old.substack.com/p/pre-existing",
+            "Pre-existing Post",
+            "Old Pub",
+            1,
+            "2026-01-01",
+            "2026-01-01",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(old_db_path)  # must not raise
+
+    post = get_post("https://old.substack.com/p/pre-existing", old_db_path)
+    assert post is not None
+    assert post.read_progress is None
+    assert post.max_read_progress is None
+    assert post.is_viewed == 0
+
+    unread = list_posts(read_state="unread", db_path=old_db_path)
+    assert len(unread) == 1
+
+
+def _progress_post(
+    url: str,
+    title: str,
+    *,
+    read_progress: float | None = None,
+    max_read_progress: float | None = None,
+    is_viewed: int = 0,
+    word_count: int | None = None,
+) -> SavedPost:
+    return SavedPost(
+        url=url,
+        title=title,
+        publication_name="Pub One",
+        excerpt="readingprogresstest content",
+        is_saved=1,
+        read_progress=read_progress,
+        max_read_progress=max_read_progress,
+        is_viewed=is_viewed,
+        word_count=word_count,
+    )
+
+
+def _seed_progress_posts(db_path: Path) -> None:
+    posts = [
+        _progress_post("https://pub1.com/p/unread", "Unread Post"),
+        _progress_post(
+            "https://pub1.com/p/opened",
+            "Opened Not Scrolled",
+            max_read_progress=0.0,
+            is_viewed=1,
+        ),
+        _progress_post(
+            "https://pub1.com/p/in-progress",
+            "In Progress Post",
+            max_read_progress=0.5,
+            is_viewed=1,
+        ),
+        _progress_post(
+            "https://pub1.com/p/finished",
+            "Finished Post",
+            max_read_progress=0.98,
+            is_viewed=1,
+        ),
+    ]
+    for post in posts:
+        upsert_post(post, db_path)
+
+
+@pytest.mark.parametrize(
+    "read_state,expected_titles",
+    [
+        ("unread", {"Unread Post"}),
+        ("in_progress", {"In Progress Post"}),
+        ("finished", {"Finished Post"}),
+        ("started", {"Opened Not Scrolled", "In Progress Post", "Finished Post"}),
+    ],
+)
+def test_list_posts_filters_by_read_state(temp_db: Path, read_state, expected_titles):
+    _seed_progress_posts(temp_db)
+    results = list_posts(read_state=read_state, db_path=temp_db)
+    assert {p.title for p in results} == expected_titles
+
+
+@pytest.mark.parametrize(
+    "read_state,expected_titles",
+    [
+        ("unread", {"Unread Post"}),
+        ("in_progress", {"In Progress Post"}),
+        ("finished", {"Finished Post"}),
+        ("started", {"Opened Not Scrolled", "In Progress Post", "Finished Post"}),
+    ],
+)
+def test_search_posts_filters_by_read_state(temp_db: Path, read_state, expected_titles):
+    _seed_progress_posts(temp_db)
+    results = search_posts(
+        "readingprogresstest", read_state=read_state, db_path=temp_db
+    )
+    assert {p.title for p in results} == expected_titles
+
+
+def test_list_posts_unknown_read_state_raises(temp_db: Path):
+    with pytest.raises(ValueError):
+        list_posts(read_state="bogus", db_path=temp_db)
+
+
+def test_search_posts_fallback_keeps_read_state_filter(temp_db: Path):
+    """Mirrors test_search_posts_fallback_keeps_filters: a malformed FTS query
+    must fall back to LIKE without silently dropping the read_state filter."""
+    upsert_post(
+        SavedPost(
+            url="https://cli.substack.com/p/quote-unread",
+            title="Quote Unread",
+            publication_name="CLI Times",
+            excerpt='she said "hello world today',
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://cli.substack.com/p/quote-finished",
+            title="Quote Finished",
+            publication_name="CLI Times",
+            excerpt='she said "hello world today',
+            max_read_progress=0.99,
+            is_viewed=1,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+
+    results = search_posts('"hello', read_state="finished", db_path=temp_db)
+    assert len(results) == 1
+    assert results[0].title == "Quote Finished"
+
+
+def test_progress_columns_surfaced_in_list_and_search(temp_db: Path):
+    """Mirrors test_image_url_surfaced_in_list_and_search: the new columns must
+    reach PostSummary through both list_posts and search_posts, not just the
+    full SavedPost returned by get_post."""
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/with-progress",
+            title="Post With Progress",
+            publication_name="Pub One",
+            excerpt="some searchable progress text",
+            word_count=1000,
+            read_progress=0.3,
+            max_read_progress=0.6,
+            is_viewed=1,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+
+    listed = list_posts(db_path=temp_db)
+    assert listed[0].read_progress == 0.3
+    assert listed[0].max_read_progress == 0.6
+    assert listed[0].is_viewed == 1
+    assert listed[0].is_fully_read is False
+    assert listed[0].minutes_remaining == 2  # ceil(1000 * (1 - 0.6) / 200)
+
+    searched = search_posts("searchable", db_path=temp_db)
+    assert searched[0].max_read_progress == 0.6
+
+
+def test_upsert_post_progress_preserved_on_none_overwritten_on_zero(temp_db: Path):
+    """The old `or`-based coalesce would have treated a real 0.0 as falsy and
+    silently kept the stale value; explicit is-not-None checks fix that while
+    still preserving stored progress when a payload (e.g. DOM-sourced) omits
+    it entirely."""
+    upsert_post(
+        SavedPost(
+            substack_post_id="500",
+            url="https://pub1.com/p/progress-post",
+            title="Progress Post",
+            publication_name="Pub One",
+            max_read_progress=0.7,
+            read_progress=0.7,
+            is_viewed=1,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+
+    preserved = upsert_post(
+        SavedPost(
+            substack_post_id="500",
+            url="https://pub1.com/p/progress-post",
+            title="Progress Post",
+            publication_name="Pub One",
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    assert preserved.max_read_progress == 0.7
+    assert preserved.read_progress == 0.7
+
+    overwritten = upsert_post(
+        SavedPost(
+            substack_post_id="500",
+            url="https://pub1.com/p/progress-post",
+            title="Progress Post",
+            publication_name="Pub One",
+            max_read_progress=0.0,
+            read_progress=0.0,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    assert overwritten.max_read_progress == 0.0
+    assert overwritten.read_progress == 0.0
+
+
+def test_get_status_progress_aggregates(temp_db: Path):
+    _seed_progress_posts(temp_db)
+    status = get_status(temp_db)
+    assert status.posts_unread == 1
+    assert status.posts_in_progress == 1
+    assert status.posts_fully_read == 1
+
+
+def test_get_status_minutes_remaining_total(temp_db: Path):
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/a",
+            title="A",
+            publication_name="Pub One",
+            word_count=1000,
+            max_read_progress=0.5,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    upsert_post(
+        SavedPost(
+            url="https://pub1.com/p/b",
+            title="B",
+            publication_name="Pub One",
+            word_count=400,
+            max_read_progress=0.0,
+            is_saved=1,
+        ),
+        temp_db,
+    )
+    status = get_status(temp_db)
+    # remaining words: 1000*0.5=500 + 400*1.0=400 -> ceil(900/200) = 5
+    assert status.minutes_remaining_total == 5
