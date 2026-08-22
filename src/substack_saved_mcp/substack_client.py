@@ -89,9 +89,19 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
     )
 
     with sync_playwright() as p:
-        # Launch visible browser
-        browser = p.chromium.launch(headless=False)
-        context_kwargs = {}
+        # Launch visible browser with anti-bot evasion flags
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context_kwargs = {
+            "user_agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "viewport": {"width": 1280, "height": 800},
+        }
         if state_file.exists():
             context_kwargs["storage_state"] = str(state_file)
 

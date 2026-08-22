@@ -804,29 +804,30 @@ def inspect_network(
     out_file = open(out_path, "a") if out_path else None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(storage_state=storage_state)
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context_kwargs = {
+            "user_agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "viewport": {"width": 1280, "height": 800},
+        }
+        if storage_state:
+            context_kwargs["storage_state"] = storage_state
+
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
 
-        def handle_route(route):
-            request = route.request
+        def handle_response(response):
+            request = response.request
             req_url = request.url
             if req_url.lower().split("?")[0].endswith(
                 _INSPECT_ASSET_SUFFIXES
             ) or not pattern.search(req_url):
-                route.continue_()
-                return
-
-            # A sync-API page.on("response") handler can deadlock calling
-            # response.text() on the same driver thread that produced it. Routing
-            # the request through route.fetch() reads the body safely outside that
-            # handler, and route.fulfill() re-serves the exact response to the page
-            # so navigation/rendering behaves identically to an unrouted request.
-            try:
-                response = route.fetch()
-            except Exception as e:
-                logger.warning(f"Could not fetch intercepted request {req_url}: {e}")
-                route.continue_()
                 return
 
             request_body = request.post_data
@@ -867,9 +868,7 @@ def inspect_network(
                 )
                 out_file.flush()
 
-            route.fulfill(response=response)
-
-        context.route("**/*", handle_route)
+        context.on("response", handle_response)
         page.goto(url)
         click.echo(
             "Navigate around the page (try the Notes toggle, save/unsave, open an "
