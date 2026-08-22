@@ -329,7 +329,7 @@ class SubstackSavedPostsClient:
         return min(0.5 * (2**attempt), cap)
 
     def _reader_api_get(
-        self, api_context: Any, url: str, max_retries: int = 3, sleep_func=time.sleep
+        self, api_context: Any, url: str, max_retries: int = 5, sleep_func=time.sleep
     ) -> Any:
         """GET a reader-API URL, retrying on 429/5xx with Retry-After-aware backoff.
 
@@ -355,7 +355,7 @@ class SubstackSavedPostsClient:
         api_context: Any,
         page_size: int = 20,
         max_posts: int = 2000,
-        max_retries: int = 3,
+        max_retries: int = 5,
         sleep_func=time.sleep,
     ) -> list[dict[str, Any]] | None:
         """Fetch the full saved list from the reader inbox API via cursor pagination.
@@ -450,7 +450,7 @@ class SubstackSavedPostsClient:
         self,
         api_context: Any,
         max_posts: int = 2000,
-        max_retries: int = 3,
+        max_retries: int = 5,
         sleep_func=time.sleep,
     ) -> list[dict[str, Any]] | None:
         """Fetch the full saved-posts list via Substack's unified reader/saved
@@ -613,7 +613,7 @@ class SubstackSavedPostsClient:
         self,
         api_context: Any,
         max_notes: int = 2000,
-        max_retries: int = 3,
+        max_retries: int = 5,
         sleep_func=time.sleep,
     ) -> list[dict[str, Any]] | None:
         """Fetch the full saved-notes list via Substack's unified reader/saved endpoint.

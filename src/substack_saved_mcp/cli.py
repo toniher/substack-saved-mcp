@@ -122,9 +122,11 @@ def sync(force: bool, only: str | None) -> None:
         # Fetching the full saved-posts list can itself trigger rate limiting
         # that would otherwise make the very next request (the notes fetch)
         # 429 through all its retries too - see the identical rationale on
-        # compare_saved_apis(). A brief pause here lets that limit cool down
-        # before the notes sync starts hammering the same reader API.
-        time.sleep(5)
+        # compare_saved_apis(). Pause to let that limit cool down.
+        cooldown = (
+            15 if (posts_ok and getattr(result, "status", None) == "partial") else 5
+        )
+        time.sleep(cooldown)
 
     if only in (None, "notes"):
         click.echo("Starting Substack saved notes sync...")
