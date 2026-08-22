@@ -262,42 +262,52 @@ class SubstackSavedPostsClient:
             # source for testing/rollback without a code change. Each source is
             # fetched once via its own cursor pagination and cached, then sliced
             # by offset so the caller keeps a simple offset/limit interface.
-            if (
-                source in ("auto", "unified")
-                and self._unified_api_cache is None
-                and not self._unified_api_failed
-            ):
-                self._unified_api_cache = self._fetch_all_saved_posts_via_unified_api(
-                    api_context()
+            try:
+                if (
+                    source in ("auto", "unified")
+                    and self._unified_api_cache is None
+                    and not self._unified_api_failed
+                ):
+                    self._unified_api_cache = (
+                        self._fetch_all_saved_posts_via_unified_api(api_context())
+                    )
+                    if self._unified_api_cache is None:
+                        self._unified_api_failed = True
+                        logger.warning(
+                            "Unified reader API unavailable; trying next source."
+                        )
+
+                if self._unified_api_cache is not None:
+                    return self._unified_api_cache[offset : offset + limit]
+
+                if (
+                    source in ("auto", "legacy")
+                    and self._api_cache is None
+                    and not self._api_failed
+                ):
+                    self._api_cache = self._fetch_all_saved_via_reader_api(
+                        api_context()
+                    )
+                    if self._api_cache is None:
+                        self._api_failed = True
+                        logger.warning(
+                            "Legacy reader inbox API unavailable; falling back to DOM extraction."
+                        )
+
+                if self._api_cache is not None:
+                    return self._api_cache[offset : offset + limit]
+
+                # Fallback: headless DOM extraction on https://substack.com/saved
+                return self._fetch_via_dom(
+                    offset=offset, limit=limit, playwright_instance=p
                 )
-                if self._unified_api_cache is None:
-                    self._unified_api_failed = True
-                    logger.warning(
-                        "Unified reader API unavailable; trying next source."
-                    )
-
-            if self._unified_api_cache is not None:
-                return self._unified_api_cache[offset : offset + limit]
-
-            if (
-                source in ("auto", "legacy")
-                and self._api_cache is None
-                and not self._api_failed
-            ):
-                self._api_cache = self._fetch_all_saved_via_reader_api(api_context())
-                if self._api_cache is None:
-                    self._api_failed = True
-                    logger.warning(
-                        "Legacy reader inbox API unavailable; falling back to DOM extraction."
-                    )
-
-            if self._api_cache is not None:
-                return self._api_cache[offset : offset + limit]
-
-            # Fallback: headless DOM extraction on https://substack.com/saved
-            return self._fetch_via_dom(
-                offset=offset, limit=limit, playwright_instance=p
-            )
+            finally:
+                ctx = api_context_box.get("ctx")
+                if ctx is not None:
+                    try:
+                        ctx.dispose()
+                    except Exception:
+                        pass
 
         if playwright_instance is not None:
             return _do_fetch(playwright_instance)
@@ -539,20 +549,30 @@ class SubstackSavedPostsClient:
 
         def _do_fetch(p):
             api_context = p.request.new_context(storage_state=str(self.state_path))
-            res = self._reader_api_get(api_context, url)
-            if res.status in (401, 403) or "sign-in" in res.url:
-                raise AuthRequiredError(
-                    "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
-                )
             try:
-                return res.json()
-            except Exception:
-                text = None
+                res = self._reader_api_get(api_context, url)
+                if res.status in (401, 403) or "sign-in" in res.url:
+                    raise AuthRequiredError(
+                        "Substack session has expired or is invalid. Please run 'substack-saved-mcp login'."
+                    )
+                if not res.ok:
+                    raise SubstackClientError(
+                        f"Probe request to {url} failed with status {res.status}."
+                    )
                 try:
-                    text = res.text()
+                    return res.json()
+                except Exception:
+                    text = None
+                    try:
+                        text = res.text()
+                    except Exception:
+                        pass
+                    return {"_status": res.status, "_raw_text": text}
+            finally:
+                try:
+                    api_context.dispose()
                 except Exception:
                     pass
-                return {"_status": res.status, "_raw_text": text}
 
         if playwright_instance is not None:
             return _do_fetch(playwright_instance)
@@ -581,7 +601,15 @@ class SubstackSavedPostsClient:
         def _do_fetch(p):
             if self._notes_api_cache is None and not self._notes_api_failed:
                 api_context = p.request.new_context(storage_state=str(self.state_path))
-                self._notes_api_cache = self._fetch_all_saved_notes_via_api(api_context)
+                try:
+                    self._notes_api_cache = self._fetch_all_saved_notes_via_api(
+                        api_context
+                    )
+                finally:
+                    try:
+                        api_context.dispose()
+                    except Exception:
+                        pass
                 if self._notes_api_cache is None:
                     self._notes_api_failed = True
 
