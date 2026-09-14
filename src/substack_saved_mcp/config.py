@@ -1,7 +1,10 @@
 """Configuration settings and filesystem path management."""
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 APP_NAME = "substack-saved-mcp"
 
@@ -80,5 +83,5 @@ def ensure_app_dirs() -> None:
         try:
             data_dir.chmod(0o700)
             browser_dir.chmod(0o700)
-        except Exception:
-            pass
+        except Exception as err:
+            logger.warning(f"Could not restrict permissions on {data_dir}: {err}")

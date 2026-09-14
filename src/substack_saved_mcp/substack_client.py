@@ -3,6 +3,7 @@
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 # Matches a note permalink's Substack comment id, e.g.
 # https://substack.com/@handle/note/c-300984381 -> "300984381"
 _NOTE_URL_ID_PATTERN = re.compile(r"/note/c-(\d+)")
+
+# Anti-bot evasion for the two headful browser flows (login, inspect-network):
+# a real Chrome UA/viewport plus disabling the automation-controlled flag.
+STEALTH_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
+STEALTH_CONTEXT_KWARGS: dict[str, Any] = {
+    "user_agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "viewport": {"width": 1280, "height": 800},
+}
 
 
 def _extract_note_id(url: str) -> str | None:
@@ -46,6 +59,20 @@ def _run_playwright_sync(func, *args, **kwargs):
     return func(*args, **kwargs)
 
 
+def _with_playwright(playwright_instance: Any, fn):
+    """Run fn(p) using an injected Playwright instance (test double) if given,
+    else spin up a real one. Shared by every ``_*_impl`` method's playwright
+    dispatch instead of each repeating the same instance-or-launch branch."""
+    if playwright_instance is not None:
+        return fn(playwright_instance)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise SubstackClientError("Playwright is not installed.") from None
+    with sync_playwright() as p:
+        return fn(p)
+
+
 class SubstackClientError(Exception):
     """Base exception for Substack client operations."""
 
@@ -56,6 +83,20 @@ class AuthRequiredError(SubstackClientError):
     """Raised when Substack session is expired, invalid, or unauthenticated."""
 
     pass
+
+
+def _require_https(url: str) -> None:
+    """Reject non-HTTPS URLs before an authenticated Playwright page navigates to
+    them, closing the file:// and internal-http(s) SSRF path a caller-supplied
+    URL (CLI arg or MCP tool input) could otherwise reach.
+
+    ponytail: scheme-only, not a domain allowlist — Substack publications can
+    live on custom domains, so a hard `*.substack.com` allowlist would reject
+    legitimate saves. Upgrade to a domain allowlist if custom-domain support
+    is ever dropped.
+    """
+    if urlparse(url).scheme != "https":
+        raise SubstackClientError(f"Refusing to navigate to non-HTTPS URL: {url}")
 
 
 def perform_interactive_login(browser_dir: Path | None = None) -> Path:
@@ -90,18 +131,8 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
 
     with sync_playwright() as p:
         # Launch visible browser with anti-bot evasion flags
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context_kwargs = {
-            "user_agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "viewport": {"width": 1280, "height": 800},
-        }
+        browser = p.chromium.launch(headless=False, args=STEALTH_LAUNCH_ARGS)
+        context_kwargs = dict(STEALTH_CONTEXT_KWARGS)
         if state_file.exists():
             context_kwargs["storage_state"] = str(state_file)
 
@@ -129,6 +160,13 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
         except Exception as err:
             logger.warning(f"Notice during login verification: {err}")
 
+        # Pre-create the credentials file with owner-only permissions so the
+        # write below never leaves a world/group-readable window (umask would
+        # otherwise apply to Playwright's own file creation). A no-op open on
+        # an already-existing file, since O_CREAT's mode is ignored then.
+        if os.name == "posix":
+            os.close(os.open(str(state_file), os.O_CREAT | os.O_WRONLY, 0o600))
+
         try:
             context.storage_state(path=str(state_file))
         except Exception as err:
@@ -139,14 +177,13 @@ def _perform_interactive_login_impl(browser_dir: Path | None = None) -> Path:
         except Exception:
             pass
 
-    # Restrict permissions on session storage state file
-    import os
-
+    # Belt-and-suspenders: re-assert restrictive permissions even though the
+    # file was pre-created 0o600 above.
     if os.name == "posix" and state_file.exists():
         try:
             state_file.chmod(0o600)
-        except Exception:
-            pass
+        except Exception as err:
+            logger.warning(f"Could not restrict permissions on {state_file}: {err}")
 
     print(f"--> Authentication state saved successfully to {state_file}")
     return state_file
@@ -309,16 +346,7 @@ class SubstackSavedPostsClient:
                     except Exception:
                         pass
 
-        if playwright_instance is not None:
-            return _do_fetch(playwright_instance)
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise SubstackClientError("Playwright is not installed.") from None
-
-        with sync_playwright() as p:
-            return _do_fetch(p)
+        return _with_playwright(playwright_instance, _do_fetch)
 
     @staticmethod
     def _retry_after_seconds(res: Any, attempt: int, cap: float = 30.0) -> float:
@@ -574,16 +602,7 @@ class SubstackSavedPostsClient:
                 except Exception:
                     pass
 
-        if playwright_instance is not None:
-            return _do_fetch(playwright_instance)
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise SubstackClientError("Playwright is not installed.") from None
-
-        with sync_playwright() as p:
-            return _do_fetch(p)
+        return _with_playwright(playwright_instance, _do_fetch)
 
     def fetch_saved_notes_page(
         self, limit: int = 50, offset: int = 0
@@ -626,16 +645,7 @@ class SubstackSavedPostsClient:
                 "endpoint can be re-diagnosed."
             )
 
-        if playwright_instance is not None:
-            return _do_fetch(playwright_instance)
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise SubstackClientError("Playwright is not installed.") from None
-
-        with sync_playwright() as p:
-            return _do_fetch(p)
+        return _with_playwright(playwright_instance, _do_fetch)
 
     def _fetch_all_saved_notes_via_api(
         self,
@@ -838,13 +848,7 @@ class SubstackSavedPostsClient:
             return results
 
         if self._dom_cache is None:
-            if playwright_instance is not None:
-                self._dom_cache = _do_fetch(playwright_instance)
-            else:
-                from playwright.sync_api import sync_playwright
-
-                with sync_playwright() as p:
-                    self._dom_cache = _do_fetch(p)
+            self._dom_cache = _with_playwright(playwright_instance, _do_fetch)
 
         return self._dom_cache[offset : offset + limit]
 
@@ -913,6 +917,7 @@ class SubstackSavedPostsClient:
     ) -> tuple[SavedPost, str]:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
+        _require_https(clean_url)
 
         def _do_save(p):
             browser = p.chromium.launch(headless=True)
@@ -989,12 +994,7 @@ class SubstackSavedPostsClient:
             )
             return saved_post, confirmation
 
-        if playwright_instance is not None:
-            return _do_save(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_save(p)
+        return _with_playwright(playwright_instance, _do_save)
 
     def fetch_post_content(self, url: str) -> dict[str, Any]:
         """Fetch a post's full body HTML by visiting its page.
@@ -1014,6 +1014,7 @@ class SubstackSavedPostsClient:
     ) -> dict[str, Any]:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
+        _require_https(clean_url)
 
         def _do_fetch(p):
             browser = p.chromium.launch(headless=True)
@@ -1043,12 +1044,7 @@ class SubstackSavedPostsClient:
                 "audience": post_obj.get("audience"),
             }
 
-        if playwright_instance is not None:
-            return _do_fetch(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_fetch(p)
+        return _with_playwright(playwright_instance, _do_fetch)
 
     def unsave_post(self, url: str, post_id: int | None = None) -> str:
         """Unbookmark a post on Substack remotely; returns a confirmation status.
@@ -1069,6 +1065,7 @@ class SubstackSavedPostsClient:
     ) -> str:
         self._ensure_authenticated()
         clean_url = canonicalize_url(url)
+        _require_https(clean_url)
 
         def _do_unsave(p):
             if post_id is not None:
@@ -1105,12 +1102,7 @@ class SubstackSavedPostsClient:
             browser.close()
             return toggle_status
 
-        if playwright_instance is not None:
-            return _do_unsave(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_unsave(p)
+        return _with_playwright(playwright_instance, _do_unsave)
 
     def save_note(self, url: str) -> tuple[SavedNote, str]:
         """Save/bookmark a Substack note by URL.
@@ -1175,12 +1167,7 @@ class SubstackSavedPostsClient:
             )
             return note, confirmation
 
-        if playwright_instance is not None:
-            return _do_save(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_save(p)
+        return _with_playwright(playwright_instance, _do_save)
 
     def unsave_note(self, url: str, note_id: str | None = None) -> str:
         """Unsave/unbookmark a Substack note; returns a confirmation status.
@@ -1216,12 +1203,7 @@ class SubstackSavedPostsClient:
                 pass
             return "unconfirmed"
 
-        if playwright_instance is not None:
-            return _do_unsave(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_unsave(p)
+        return _with_playwright(playwright_instance, _do_unsave)
 
     def fetch_note_content(self, url: str) -> dict[str, Any]:
         """Fetch a saved note's full content directly, without a browser page.
@@ -1274,9 +1256,4 @@ class SubstackSavedPostsClient:
                 "posted_at": comment.get("date"),
             }
 
-        if playwright_instance is not None:
-            return _do_fetch(playwright_instance)
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            return _do_fetch(p)
+        return _with_playwright(playwright_instance, _do_fetch)

@@ -344,6 +344,22 @@ def test_unsave_post_impl_falls_back_to_dom_when_api_delete_fails(tmp_path: Path
     assert status == "confirmed"  # confirmed via the DOM fallback, not the API
 
 
+@pytest.mark.parametrize(
+    "method", ["_save_post_impl", "_unsave_post_impl", "_fetch_post_content_impl"]
+)
+@pytest.mark.parametrize(
+    "url",
+    ["file:///etc/shadow", "http://169.254.169.254/", "http://localhost:8000/admin"],
+)
+def test_impl_rejects_non_https_url(tmp_path: Path, method: str, url: str):
+    """SSRF guard: a non-HTTPS URL must be rejected before any Playwright
+    navigation happens. playwright_instance is left unset (None) so a page
+    double is never even needed if the guard fires first."""
+    client = _client(tmp_path)
+    with pytest.raises(SubstackClientError, match="non-HTTPS"):
+        getattr(client, method)(url=url)
+
+
 class MockNoteApiResponse:
     """API response double for notes: no browser page needed at all, so this
     is the only mock notes' save/unsave/fetch tests require."""

@@ -66,6 +66,52 @@ def _read_state_clause(
     return clause, params
 
 
+def _resolve_row(
+    cursor: sqlite3.Cursor, table: str, id_column: str, url_or_id: str | int
+) -> sqlite3.Row | None:
+    """Look up a posts/notes row by local numeric id, or by URL/Substack id
+    otherwise. Shared by get_post/soft_delete_post/get_note/soft_delete_note,
+    which all resolved this identically except for the table and id column name."""
+    if isinstance(url_or_id, int) or (
+        isinstance(url_or_id, str) and url_or_id.isdigit()
+    ):
+        cursor.execute(f"SELECT * FROM {table} WHERE id = ?", (int(url_or_id),))
+    else:
+        clean_url = canonicalize_url(str(url_or_id))
+        cursor.execute(
+            f"SELECT * FROM {table} WHERE url = ? OR {id_column} = ?",
+            (clean_url, str(url_or_id)),
+        )
+    return cursor.fetchone()
+
+
+def _last_sync_info(
+    cursor: sqlite3.Cursor, entity: str
+) -> tuple[str | None, str | None]:
+    """Return (last_successful_completed_at, last_status) for a sync_runs
+    entity ('post' or 'note'). Shared by get_status()'s post/note blocks,
+    which were otherwise identical two-query lookups."""
+    cursor.execute(
+        """
+        SELECT completed_at FROM sync_runs
+        WHERE status = 'success' AND entity = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (entity,),
+    )
+    success_row = cursor.fetchone()
+    last_success = success_row["completed_at"] if success_row else None
+
+    cursor.execute(
+        "SELECT status FROM sync_runs WHERE entity = ? ORDER BY id DESC LIMIT 1",
+        (entity,),
+    )
+    status_row = cursor.fetchone()
+    last_status = status_row["status"] if status_row else None
+
+    return last_success, last_status
+
+
 @contextmanager
 def get_db_connection(
     db_path: Path | None = None,
@@ -435,18 +481,7 @@ def soft_delete_post(
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
 
-        if isinstance(url_or_id, int) or (
-            isinstance(url_or_id, str) and url_or_id.isdigit()
-        ):
-            cursor.execute("SELECT * FROM posts WHERE id = ?", (int(url_or_id),))
-        else:
-            clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute(
-                "SELECT * FROM posts WHERE url = ? OR substack_post_id = ?",
-                (clean_url, str(url_or_id)),
-            )
-
-        row = cursor.fetchone()
+        row = _resolve_row(cursor, "posts", "substack_post_id", url_or_id)
         if not row:
             return None
 
@@ -496,17 +531,7 @@ def get_post(url_or_id: str | int, db_path: Path | None = None) -> SavedPost | N
     """Retrieve full post record by local ID, Substack post ID, or URL."""
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        if isinstance(url_or_id, int) or (
-            isinstance(url_or_id, str) and url_or_id.isdigit()
-        ):
-            cursor.execute("SELECT * FROM posts WHERE id = ?", (int(url_or_id),))
-        else:
-            clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute(
-                "SELECT * FROM posts WHERE url = ? OR substack_post_id = ?",
-                (clean_url, str(url_or_id)),
-            )
-        row = cursor.fetchone()
+        row = _resolve_row(cursor, "posts", "substack_post_id", url_or_id)
         return SavedPost(**dict(row)) if row else None
 
 
@@ -775,37 +800,8 @@ def get_status(db_path: Path | None = None) -> SavedPostsStatus:
         remaining_words = cursor.fetchone()[0] or 0
         minutes_remaining_total = math.ceil(remaining_words / WORDS_PER_MINUTE)
 
-        cursor.execute("""
-            SELECT completed_at, status FROM sync_runs
-            WHERE status = 'success' AND entity = 'post'
-            ORDER BY id DESC LIMIT 1
-        """)
-        last_success_row = cursor.fetchone()
-        last_success = last_success_row["completed_at"] if last_success_row else None
-
-        cursor.execute(
-            "SELECT status FROM sync_runs WHERE entity = 'post' ORDER BY id DESC LIMIT 1"
-        )
-        last_status_row = cursor.fetchone()
-        last_status = last_status_row["status"] if last_status_row else None
-
-        cursor.execute("""
-            SELECT completed_at, status FROM sync_runs
-            WHERE status = 'success' AND entity = 'note'
-            ORDER BY id DESC LIMIT 1
-        """)
-        last_note_success_row = cursor.fetchone()
-        last_note_success = (
-            last_note_success_row["completed_at"] if last_note_success_row else None
-        )
-
-        cursor.execute(
-            "SELECT status FROM sync_runs WHERE entity = 'note' ORDER BY id DESC LIMIT 1"
-        )
-        last_note_status_row = cursor.fetchone()
-        last_note_status = (
-            last_note_status_row["status"] if last_note_status_row else None
-        )
+        last_success, last_status = _last_sync_info(cursor, "post")
+        last_note_success, last_note_status = _last_sync_info(cursor, "note")
 
         return SavedPostsStatus(
             total_saved_posts=total_saved,
@@ -1003,17 +999,7 @@ def get_note(url_or_id: str | int, db_path: Path | None = None) -> SavedNote | N
     """Retrieve full note record by local ID, Substack note ID, or URL."""
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        if isinstance(url_or_id, int) or (
-            isinstance(url_or_id, str) and url_or_id.isdigit()
-        ):
-            cursor.execute("SELECT * FROM notes WHERE id = ?", (int(url_or_id),))
-        else:
-            clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute(
-                "SELECT * FROM notes WHERE url = ? OR substack_note_id = ?",
-                (clean_url, str(url_or_id)),
-            )
-        row = cursor.fetchone()
+        row = _resolve_row(cursor, "notes", "substack_note_id", url_or_id)
         return SavedNote(**dict(row)) if row else None
 
 
@@ -1044,18 +1030,7 @@ def soft_delete_note(
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
 
-        if isinstance(url_or_id, int) or (
-            isinstance(url_or_id, str) and url_or_id.isdigit()
-        ):
-            cursor.execute("SELECT * FROM notes WHERE id = ?", (int(url_or_id),))
-        else:
-            clean_url = canonicalize_url(str(url_or_id))
-            cursor.execute(
-                "SELECT * FROM notes WHERE url = ? OR substack_note_id = ?",
-                (clean_url, str(url_or_id)),
-            )
-
-        row = cursor.fetchone()
+        row = _resolve_row(cursor, "notes", "substack_note_id", url_or_id)
         if not row:
             return None
 

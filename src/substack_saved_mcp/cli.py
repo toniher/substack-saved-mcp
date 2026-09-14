@@ -50,6 +50,8 @@ from substack_saved_mcp.database import (
 )
 from substack_saved_mcp.mcp_server import run_server
 from substack_saved_mcp.substack_client import (
+    STEALTH_CONTEXT_KWARGS,
+    STEALTH_LAUNCH_ARGS,
     AuthRequiredError,
     SubstackSavedPostsClient,
     perform_interactive_login,
@@ -806,18 +808,8 @@ def inspect_network(
     out_file = open(out_path, "a") if out_path else None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context_kwargs = {
-            "user_agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "viewport": {"width": 1280, "height": 800},
-        }
+        browser = p.chromium.launch(headless=False, args=STEALTH_LAUNCH_ARGS)
+        context_kwargs = dict(STEALTH_CONTEXT_KWARGS)
         if storage_state:
             context_kwargs["storage_state"] = storage_state
 
